@@ -15,7 +15,7 @@ from setuptools.extension import Extension
 from Cython.Build import cythonize
 
 # Package meta-data.
-NAME = 'image-noise-gate'
+NAME = 'NoiseGate'
 DESCRIPTION = 'Denoising of images and image sequences'
 URL = 'https://github.com/drzowie/image-noise-gate'
 EMAIL = 'deforest@boulder.swri.edu'
@@ -62,8 +62,8 @@ else:
 # Set up extensions - trivial with just helpers, but 
 # useful later if we have to link in C libraries etc.
 extensions = [
-    Extension("ImageNoiseGate_Tools",
-              [here+"/image-noise-gate/tools.pyx"],
+    Extension("noisegatetools",
+              [here+"/noisegate/tools.pyx"],
               include_dirs = [np_get_include()],
               )
     ]
@@ -79,7 +79,7 @@ setup(
     author_email=EMAIL,
     python_requires=REQUIRES_PYTHON,
     url=URL,
-    packages=find_packages(where='transform'),
+    packages=find_packages(where='noisegate'),
     # If your package is a single module, use this instead of 'packages':
     # py_modules=['mypackage'],
 
