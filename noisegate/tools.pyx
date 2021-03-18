@@ -34,19 +34,18 @@ def shred2d(
 
     '''
     
-    cdef long xmax = source.shape[1]
-    cdef long ymax = source.shape[0]
+    cdef long source_xsiz = source.shape[1]
+    cdef long source_ysiz = source.shape[0]
     cdef long chunk_x,chunk_y, x,y;
     cdef long chunk_xi, chunk_yi
-    cdef long x1,y1
     
     cdef long xsiz = size[1]
     cdef long ysiz = size[0]
     cdef long xstep = step[1]
     cdef long ystep = step[0]
     
-    cdef long chunk_y_count = np.floor((ymax-ysiz+1)/ystep)
-    cdef long chunk_x_count = np.floor((xmax-xsiz+1)/xstep)
+    cdef long chunk_y_count = np.floor((source_ysiz-ysiz+1)/ystep)
+    cdef long chunk_x_count = np.floor((source_xsiz-xsiz+1)/xstep)
     
     output = np.empty(  chunk_y_count, chunk_x_count,
                         ysiz,          xsiz,
@@ -54,21 +53,18 @@ def shred2d(
                         )
 
     chunk_y0 = 0
-    for chunk_yi in range(ymax):
-        
+    for chunk_yi in range(chunk_y_count):
         chunk_x0 = 0                
-        for chunk_xi in range(xmax):
-            
+        for chunk_xi in range(chunk_x_count):
             output[ chunk_yi, chunk_xi, :, : ] = \
                 source[ chunk_y0:chunk_y0+ysiz,
                         chunk_x0:chunk_x0+xsiz
                         ]
-                
-            
-            chunk_x0 += xsiz
-        
-        chunk_y0 += ysiz
-    
+            chunk_x0 += xstep
+        chunk_y0 += ystep
+    return output
+
+
     
             
             
