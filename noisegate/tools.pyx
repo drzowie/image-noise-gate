@@ -113,12 +113,12 @@ def shred(
         chunk_x_count = np.floor((source.shape[2]-xsize+1)/xstep).astype(int)
     
         output = np.empty(  [ chunk_z_count, chunk_y_count, chunk_x_count,
-                              zsize,         ysize,          xsize
+                              zsize,         ysize,         xsize
                              ],
                           dtype=float,   order='C'
                           )
         chunk_z0 = 0
-        for chunk_z in range(chunk_z_count):
+        for chunk_zi in range(chunk_z_count):
             chunk_y0 = 0
             for chunk_yi in range(chunk_y_count):
                 chunk_x0 = 0                
@@ -132,9 +132,49 @@ def shred(
                 chunk_y0 += ystep
             chunk_z0 += zstep
         return output
- 
+    
+    elif(N==4):
+        xsize = size[3]
+        xstep = step[3]
+        ysize = size[2]
+        ystep = step[2]
+        zsize = size[1]
+        zstep = step[1]
+        wsize = size[0]
+        wstep = step[0]
+        
+        chunk_w_count = np.floor((source.shape[0]-wsize+1)/wstep).astype(int)
+        chunk_z_count = np.floor((source.shape[1]-zsize+1)/zstep).astype(int)
+        chunk_y_count = np.floor((source.shape[2]-ysize+1)/ystep).astype(int)
+        chunk_x_count = np.floor((source.shape[3]-xsize+1)/xstep).astype(int)
+    
+        output = np.empty(  [ chunk_w_count, chunk_z_count, chunk_y_count, chunk_x_count,
+                              wsize,         zsize,         ysize,         xsize
+                             ],
+                          dtype=float,   order='C'
+                          )
+        chunk_w0 = 0
+        for chunk_wi in range(chunk_w_count):
+            chunk_z0 = 0
+            for chunk_zi in range(chunk_z_count):
+                chunk_y0 = 0
+                for chunk_yi in range(chunk_y_count):
+                    chunk_x0 = 0                
+                    for chunk_xi in range(chunk_x_count):
+                        output[ chunk_wi, chunk_zi, chunk_yi, chunk_xi, :, :, : ] = \
+                            source[ chunk_w0:chunk_w0+wsize,
+                                    chunk_z0:chunk_z0+zsize,
+                                    chunk_y0:chunk_y0+ysize,
+                                    chunk_x0:chunk_x0+xsize
+                                    ]
+                        chunk_x0 += xstep
+                    chunk_y0 += ystep
+                chunk_z0 += zstep
+            chunk_w0 += wstep
+        return output
+
     else:
-        raise(AssertionError("noisegate.tools.shred: N must be 1, 2, or 3"))
+        raise(AssertionError("noisegate.tools.shred: N must be 1, 2, 3, or 4"))
             
 
    
