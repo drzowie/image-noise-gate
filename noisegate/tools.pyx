@@ -28,7 +28,7 @@ def shred(
 
     Parameters
     ----------
-     source : numpy NDArray 
+     source : numpy array with 1, 2, 3, or 4 axes
          This is the data to shred.
      size: tuple or list of describing the size of each cutout
      step: tuple or list of describing the step between cutouts
@@ -45,19 +45,30 @@ def shred(
     # single general-purpose case.  But the API is unified in case I (or you)
     # later think of a general-purpose way of doing this that is more elegant.
     #
+    #
+    # About the only real optimizations here are:
+    #  (1) compilation of the hotspot variables through cdef
+    #  (2) ordering of the loop nesting to reduce L2/L3 cache violations
+    
+    # Detect dimensionality
     N = len(source.shape)
+    
+    # "Thread" if a scalar is passed in for either size or step
     if( len(size)==1 ):
         size = size + np.zeros(N)
     if( len(step)==1 ):
         step = step + np.zeros(N)
         
+    # Make sure everything shook out to the right dimensionality
     if(len(size) != N  or  len(step) != N):
         raise(ValueError("noisegate.tools.shred: size and step must match the input array"))
 
+    # Declare compiled C-like variables to make loops run faster
     cdef long chunk_xi, chunk_yi, chunk_zi, chunk_wi
     cdef long xstep, ystep, zstep, wstep
     cdef long xsize, ysize, zsize, wsize
     cdef long chunk_x0, chunk_y0, chunk_z0, chunk_w0
+    cdef long chunk_x_count, chunk_y_count, chunk_z_count, chunk_w_count
         
     if(N==1):
         xsize = size[0]
