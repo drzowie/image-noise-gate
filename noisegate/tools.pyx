@@ -52,7 +52,7 @@ def shred2d(
                          ],
                          dtype=float,   order='C'
                         )
-    print( f"output size is {output.size}")
+
     chunk_y0 = 0
     for chunk_yi in range(chunk_y_count):
         chunk_x0 = 0                
