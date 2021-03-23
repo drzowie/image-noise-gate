@@ -62,7 +62,7 @@ else:
 # Set up extensions - trivial with just helpers, but 
 # useful later if we have to link in C libraries etc.
 extensions = [
-    Extension("noisegatetools",
+    Extension("noisegate.tools",
               [here+"/noisegate/tools.pyx"],
               include_dirs = [np_get_include()],
               )
