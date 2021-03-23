@@ -47,11 +47,12 @@ def shred2d(
     cdef long chunk_y_count = np.floor((source_ysiz-ysiz+1)/ystep)
     cdef long chunk_x_count = np.floor((source_xsiz-xsiz+1)/xstep)
     
-    output = np.empty(  chunk_y_count, chunk_x_count,
-                        ysiz,          xsiz,
-                        dtype=float,   order='C'
+    output = np.empty(  [ chunk_y_count, chunk_x_count,
+                         ysiz,          xsiz
+                         ],
+                         dtype=float,   order='C'
                         )
-
+    print( f"output size is {output.size}")
     chunk_y0 = 0
     for chunk_yi in range(chunk_y_count):
         chunk_x0 = 0                
