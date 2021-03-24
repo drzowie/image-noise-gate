@@ -81,4 +81,12 @@ def test_001_shred():
     assert(np.all(b[0,1,0,0]==bb+300))
     assert(np.all(b[0,0,1,0]==bb+20))
     assert(np.all(b[0,0,0,1]==bb+1))
+    
+    a = (np.mgrid[0:10,0:10,0:10,0:10,0:10].T.astype(float)*np.array([1,10,100,1000,10000])).sum(axis=5)
+    try:
+        b=ng.shred(a,[2,2,3,4,6],[5,4,3,2,1])
+        assert(false)
+    except:
+        pass
+    
            
