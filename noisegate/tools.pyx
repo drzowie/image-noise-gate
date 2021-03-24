@@ -45,9 +45,9 @@ def shred(
     
     #
     # CED - separate cases because they'll run faster, I think, than a 
-    # single general-purpose case.  But the API is unified in case I (or you)
-    # later think of a general-purpose way of doing this that is more elegant.
-    #
+    # single general-purpose case unless I drop all the way in to C.  But 
+    # the API is unified in case I (or you) later think of a general-purpose 
+    # way of doing this that is more elegant.
     #
     # About the only real optimizations here are:
     #  (1) compilation of the hotspot variables through cdef
@@ -74,8 +74,7 @@ def shred(
     cdef long chunk_x_count, chunk_y_count, chunk_z_count, chunk_w_count
         
     if(N==1):
-        xsize = size[0]
-        xstep = step[0]
+        (xsize,xstep) = (size[0],step[0])
         chunk_x_count = np.floor((source.shape[0]-xsize+1)/xstep).astype(int)
         
         output = np.empty([chunk_x_count, xsize],dtype=float,order='C')
@@ -88,13 +87,11 @@ def shred(
         return output
  
     elif(N==2):
-        xsize = size[1]
-        xstep = step[1]
-        ysize = size[0]
-        ystep = step[0]
+        ( xsize, xstep ) = ( size[1], step[1] )
+        ( ysize, ystep ) = ( size[0], step[0] )
 
-        chunk_y_count = np.floor((source.shape[0]-ysize+1)/ystep).astype(int)
         chunk_x_count = np.floor((source.shape[1]-xsize+1)/xstep).astype(int)
+        chunk_y_count = np.floor((source.shape[0]-ysize+1)/ystep).astype(int)
 
         output = np.empty(  [ chunk_y_count, chunk_x_count,
                               ysize,         xsize
@@ -115,16 +112,13 @@ def shred(
         return output
     
     elif(N==3):
-        xsize = size[2]
-        xstep = step[2]
-        ysize = size[1]
-        ystep = step[1]
-        zsize = size[0]
-        zstep = step[0]
+        ( xsize, xstep ) = ( size[2], step[2] )
+        ( ysize, ystep ) = ( size[1], step[1] )
+        ( zsize, zstep ) = ( size[0], step[0] )
         
-        chunk_z_count = np.floor((source.shape[0]-zsize+1)/zstep).astype(int)
-        chunk_y_count = np.floor((source.shape[1]-ysize+1)/ystep).astype(int)
         chunk_x_count = np.floor((source.shape[2]-xsize+1)/xstep).astype(int)
+        chunk_y_count = np.floor((source.shape[1]-ysize+1)/ystep).astype(int)
+        chunk_z_count = np.floor((source.shape[0]-zsize+1)/zstep).astype(int)
     
         output = np.empty(  [ chunk_z_count, chunk_y_count, chunk_x_count,
                               zsize,         ysize,         xsize
@@ -148,19 +142,15 @@ def shred(
         return output
     
     elif(N==4):
-        xsize = size[3]
-        xstep = step[3]
-        ysize = size[2]
-        ystep = step[2]
-        zsize = size[1]
-        zstep = step[1]
-        wsize = size[0]
-        wstep = step[0]
-        
-        chunk_w_count = np.floor((source.shape[0]-wsize+1)/wstep).astype(int)
-        chunk_z_count = np.floor((source.shape[1]-zsize+1)/zstep).astype(int)
-        chunk_y_count = np.floor((source.shape[2]-ysize+1)/ystep).astype(int)
+        ( xsize, xstep ) = ( size[3], step[3] )
+        ( ysize, ystep ) = ( size[2], step[2] )
+        ( zsize, zstep ) = ( size[1], step[1] )
+        ( wsize, wstep ) = ( size[0], step[0] )
+    
         chunk_x_count = np.floor((source.shape[3]-xsize+1)/xstep).astype(int)
+        chunk_y_count = np.floor((source.shape[2]-ysize+1)/ystep).astype(int)
+        chunk_z_count = np.floor((source.shape[1]-zsize+1)/zstep).astype(int)
+        chunk_w_count = np.floor((source.shape[0]-wsize+1)/wstep).astype(int)
     
         output = np.empty(  [ chunk_w_count, chunk_z_count, chunk_y_count, chunk_x_count,
                               wsize,         zsize,         ysize,         xsize
@@ -191,6 +181,37 @@ def shred(
         raise(AssertionError("noisegate.tools.shred: N must be 1, 2, 3, or 4"))
             
 
+def unshread(
+        source,
+        step,
+        average=False
+        ):
+    '''
+    unshred - reconstitute a previously-shredded array from the neighborhoods
+    that were chopped up.  You have to specify the step size through the 
+    output array associated with jumping from chunk to chunk.  This should be
+    left over from when you shredded the array earlier.
+    
+    When a given pixels is present in more than one chunk, unshred can either
+    sum (the default) or average (if a flag is set) across the multiple values.
+
+    Parameters
+    ----------
+    source : Numpy array with 2N axes
+        A previously-shredded array to recombine
+    step : Arraylike 
+        Τhis is the cross-neighborhood stride in the reconstituted array.
+        It should contain either one integer (in which case it applies to 
+        all the axes) or N integers.
+    average : boolean
+        If this flag is true, average across pixel values that are duplicated
+        in more than one chunk of the shredded array.  Normally, simple summing
+        is used -- this requires proper apodization.
+
+    Returns
+    -------
+    A numpy array with N axes, containing the reconstituted data
+    '''
    
             
             
