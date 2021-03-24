@@ -30,8 +30,11 @@ def shred(
     ----------
      source : numpy array with 1, 2, 3, or 4 axes
          This is the data to shred.
-     size: tuple or list of describing the size of each cutout
-     step: tuple or list of describing the step between cutouts
+     size: tuple or list of describing the size of each cutout, in descending
+         (...,Y,X) axis order (since it is essentially an index, not a vector).
+         
+     step: tuple or list of describing the step between cutouts, in descending
+         (...,Y,X) axis order (since it is esentially an index, not a vector).
 
     Returns
     -------
@@ -75,7 +78,7 @@ def shred(
         xstep = step[0]
         chunk_x_count = np.floor((source.shape[0]-xsize+1)/xstep).astype(int)
         
-        output = np.empty([chunk_x_count, size[0]],dtype=float,order='C')
+        output = np.empty([chunk_x_count, xsize],dtype=float,order='C')
 
         chunk_x0 = 0
         for chunk_xi in range(chunk_x_count):
