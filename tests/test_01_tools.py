@@ -85,8 +85,13 @@ def test_001_shred():
     a = (np.mgrid[0:10,0:10,0:10,0:10,0:10].T.astype(float)*np.array([1,10,100,1000,10000])).sum(axis=5)
     try:
         b=ng.shred(a,[2,2,3,4,6],[5,4,3,2,1])
-        assert(false)
+        assert(False)
     except:
         pass
     
-           
+def test_002_unshred():
+    # 1-D case
+    a = np.ones([4,5])
+    b = ng.unshred(a,[2,])
+    
+    

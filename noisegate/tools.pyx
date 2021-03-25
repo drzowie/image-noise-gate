@@ -181,7 +181,7 @@ def shred(
         raise(AssertionError("noisegate.tools.shred: N must be 1, 2, 3, or 4"))
             
 
-def unshread(
+def unshred(
         source,
         step,
         average=False
@@ -194,6 +194,7 @@ def unshread(
     
     When a given pixels is present in more than one chunk, unshred can either
     sum (the default) or average (if a flag is set) across the multiple values.
+    (NOTE: averaging is not yet implemented, only summing)
 
     Parameters
     ----------
@@ -212,7 +213,115 @@ def unshread(
     -------
     A numpy array with N axes, containing the reconstituted data
     '''
+    cdef long N
+    NN = len(source.shape)
+    if(NN%2):
+        raise ValueError("unshred: source array must have 2N axes")
+    N = NN/2
+    
+    if(len(step)==1):
+        step = np.zeros(N)+step
+    
+    if(step.size != N):
+        raise ValueError("unshred: step array must match original source")
+    
+    if(average):
+        raise AssertionError("unshred: averaging is not implemented")
    
+    cdef long xsize,ysize,zsize,wsize
+    cdef long xn,yn,zn,wn
+    cdef long xi,yi,zi,wi
+    cdef long x0,y0,z0,w0
+    cdef long xstep,ystep,zstep,wstep
+    
+    if( N==1 ):
+        ( xstep, xn, xsize ) = ( step[0], source.shape[0], source.shape[0+1])
+       
+        out = np.zeros( [
+            xn * xstep + xsize
+            ] )
+        
+        x0 = 0
+        for xi in range(xn):
+            out[x0:x0+xsize] += source[xi,:]
+            x0 += xstep
+        return out
+    
+    elif( N==2) :
+        ( xstep, xn, xsize ) = ( step[1], source.shape[1], source.shape[1+2] )
+        ( ystep, yn, ysize ) = ( step[0], source.shape[0], source.shape[0+2] )
+            
+        out = np.zeros( [
+            yn * ystep + ysize,
+            xn * xstep + xsize
+            ] )
+        
+        y0 = 0
+        for yi in range(yn):
+            x0 = 0
+            for xi in range(xn):
+                out[y0:y0+ysize, x0:x0+xsize] += source[yi,xi,:,:]
+                x0 += xstep
+            y0 += ystep
+        return out
+    
+    elif( N==3 ):
+        ( xstep, xn, xsize ) = ( step[2], source.shape[2], source.shape[2+3] )
+        ( ystep, yn, ysize ) = ( step[1], source.shape[1], source.shape[1+3] )
+        ( zstep, zn, zsize ) = ( step[0], source.shape[0], source.shape[0+3] )
+        
+        out = np.zeros( [
+            zn * zstep + zsize,
+            yn * ystep + ysize,
+            xn * xstep + xsize
+            ] )
+        
+        z0 = 0
+        for zi in range(zn):
+            y0 = 0
+            for yi in range(yn):
+                x0 = 0
+                for xi in range(xn):
+                    out[z0:z0+zsize, y0:y0+ysize, x0:x0+xsize] += source[zi,yi,xi,:,:,:]
+                    x0 += xstep
+                y0 += ystep
+            z0 += zstep
+        return out
+    
+    elif( N==4 ):
+        ( xstep, xn, xsize ) = ( step[3], source.shape[3], source.shape[3+4] )
+        ( ystep, yn, ysize ) = ( step[2], source.shape[2], source.shape[2+4] )
+        ( zstep, zn, zsize ) = ( step[1], source.shape[1], source.shape[1+4] )
+        ( wstep, wn, wsize ) = ( step[0], source.shape[0], source.shape[0+4] )
+        
+        out = np.zeros( [
+            wn * wstep + wsize,
+            zn * zstep + zsize,
+            yn * ystep + ysize,
+            xn * xstep + xsize
+            ])
+        
+        w0 = 0
+        for wi in range(wn):
+            z0 = 0
+            for zi in range(zn):
+                y0 = 0
+                for yi in range(yn):
+                    x0 = 0
+                    for xi in range(xn):
+                        out[w0:w0+wsize, z0:z0+zsize, y0:y0+ysize, x0:x0+xsize] \
+                            += source[wi,zi,yi,xi,:,:,:,:]
+                        x0 += xstep
+                    y0 += ystep
+                z0 += zstep
+            w0 += wstep
+        return out
+    
+    else:
+        raise(ValueError("unshred: dimension N must be 1, 2, 3, or 4"))
+    
+                        
+        
             
             
 
