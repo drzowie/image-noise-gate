@@ -93,5 +93,6 @@ def test_002_unshred():
     # 1-D case
     a = np.ones([4,5])
     b = ng.unshred(a,[2,])
-    
+    assert(b.size == 3*2+5)
+    assert(all(b==np.array([1,1,2,2,3,2,3,2,2,1,1])))
     

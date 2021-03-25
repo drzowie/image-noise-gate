@@ -238,7 +238,7 @@ def unshred(
         ( xstep, xn, xsize ) = ( step[0], source.shape[0], source.shape[0+1])
        
         out = np.zeros( [
-            xn * xstep + xsize
+            (xn-1) * xstep + xsize
             ] )
         
         x0 = 0
@@ -252,8 +252,8 @@ def unshred(
         ( ystep, yn, ysize ) = ( step[0], source.shape[0], source.shape[0+2] )
             
         out = np.zeros( [
-            yn * ystep + ysize,
-            xn * xstep + xsize
+            (yn-1) * ystep + ysize,
+            (xn-1) * xstep + xsize
             ] )
         
         y0 = 0
@@ -271,9 +271,9 @@ def unshred(
         ( zstep, zn, zsize ) = ( step[0], source.shape[0], source.shape[0+3] )
         
         out = np.zeros( [
-            zn * zstep + zsize,
-            yn * ystep + ysize,
-            xn * xstep + xsize
+            (zn-1) * zstep + zsize,
+            (yn-1) * ystep + ysize,
+            (xn-1) * xstep + xsize
             ] )
         
         z0 = 0
@@ -295,10 +295,10 @@ def unshred(
         ( wstep, wn, wsize ) = ( step[0], source.shape[0], source.shape[0+4] )
         
         out = np.zeros( [
-            wn * wstep + wsize,
-            zn * zstep + zsize,
-            yn * ystep + ysize,
-            xn * xstep + xsize
+            (wn-1) * wstep + wsize,
+            (zn-1) * zstep + zsize,
+            (yn-1) * ystep + ysize,
+            (xn-1) * xstep + xsize
             ])
         
         w0 = 0
