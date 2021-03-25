@@ -320,7 +320,75 @@ def unshred(
     else:
         raise(ValueError("unshred: dimension N must be 1, 2, 3, or 4"))
     
-                        
+        
+def hannify(source, order=2, axis=None, copy=False):
+    '''
+    hannify - Apply Hann windows to a broadcast collection of data "cubes"
+    
+    The Hann window is sin^2, scaled to the size of the window itself.  The 
+    sin function is scaled so that the center of the window is unity and the 
+    wavelength is the same as the width of the window.
+    
+    The "order" parameter permits other powers of sin to be used.
+
+    Parameters
+    ----------
+    source :  Numpy array 
+    order : float, optional
+        This is the exponential order of the Hann window (default is 2)
+    axis : None or int or list of ints
+        This is the axis to which the Hann window should be applied.  if it is
+        None, then the last N axes are used.
+    copy : Boolean (default False)
+        Indicates whether the data should be copied before treatment
+
+    Returns
+    -------
+    None.
+
+    '''
+    cdef int axis_i
+    cdef int N = len( source.shape )
+    
+    if(axis==None):
+        if( N % 2):
+            raise ValueError("hannify: if axis is not specified, source must have 2N axes")
+        axis = list( range( N/2, N ) )
+        
+         
+    if(copy):
+        source = np.copy(source)
+            
+    for axis_i in axis:
+       
+        axes = list(range(N));
+        axes[axis_i]=N-1
+        axes[N-1]=axis_i
+        ss = np.transpose(source,axes=tuple(axes))
+        dex = np.mgrid[0:ss.shape[N-1]]
+        dex -= ss.shape[N-1]/2
+        dex *= np.pi/ss.shape[N-1]
+        
+        window = sin(dex)
+        if(order==1):
+            pass
+        elif(order==2):
+            window *= window
+        elif(order==3):
+            window *= (window*window)
+        elif(order==4):
+             window *= window
+             window *= window
+        else:
+            window = window**order
+        
+        ss *= window
+    
+    return source
+
+
+
+                     
         
             
             
