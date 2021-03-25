@@ -38,7 +38,7 @@ def test_001_shred():
                    np.array([[0,1,2,3],[10,11,12,13]])))
     assert( np.all( b[0,1] == 
                    np.array([[2,3,4,5],[12,13,14,15]])))
-    assert( np.all( b[1,0] == 
+    assert( np.all( b[1,0] ==
                    np.array([[30,31,32,33],[40,41,42,43]])))
                              
     # 3-D: 10x10x10 grid, 0 to 999
@@ -95,4 +95,17 @@ def test_002_unshred():
     b = ng.unshred(a,[2,])
     assert(b.size == 3*2+5)
     assert(all(b==np.array([1,1,2,2,3,2,3,2,2,1,1])))
+    
+    # 2-D: a 4x3 array of 5x2 chunks
+    a = np.ones([3,4,2,5])
+    b = ng.unshred(a,[1,2])
+    assert(b.shape == (2*1+2,3*2+5))
+    assert(all(b[0,:]==np.array([1,1,2,2,3,2,3,2,2,1,1])))
+    assert(all(b[1,:]==np.array([2,2,4,4,6,4,6,4,4,2,2])))
+    assert(all(b[2,:]==np.array([2,2,4,4,6,4,6,4,4,2,2])))
+    assert(all(b[3,:]==np.array([1,1,2,2,3,2,3,2,2,1,1])))
+    
+    # 2-D: check scalar step spec
+    b = ng.unshred(a,[1])
+    
     

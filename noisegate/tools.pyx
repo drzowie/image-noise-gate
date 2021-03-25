@@ -222,7 +222,7 @@ def unshred(
     if(len(step)==1):
         step = np.zeros(N)+step
     
-    if(step.size != N):
+    if(len(step) != N):
         raise ValueError("unshred: step array must match original source")
     
     if(average):
