@@ -108,5 +108,57 @@ def test_002_unshred():
     # 2-D: check scalar step spec
     b = ng.unshred(a,[1])
     
+def test_003_hannify():
+    # N=1 (2-D chunk) case:  three 4-element chunks
+    data = np.ones([3,4])
+    data0 = np.copy(data)
+    ng.hannify(data)
+    assert( data.shape == data0.shape )
+    assert( not np.all( data0 == data ) )
+    assert( np.all(np.isclose(data,data[:,range(data.shape[1]-1,-1,-1)])))
+    assert( np.sum(data[0,:])==2 )
+    
+    # N=2 (4-D chunk) case: four 3x4-element chunks
+    data = np.ones([2,2,3,4])
+    data0 = np.copy(data)
+    ng.hannify(data)
+    assert(data.shape==data0.shape)
+    assert( not np.all(data0==data) )
+    assert(np.all(np.isclose(
+        data,
+        data[
+            :,
+            :,
+            range(data.shape[2]-1,-1,-1),
+            :
+            ],
+        atol=1e-9
+        ) ) )
+    assert(np.all(np.isclose(
+        data,
+        data[
+            :,
+            :,
+            :,
+            range(data.shape[3]-1,-1,-1),
+            ],
+        atol=1e-9
+        ) ) )
+    assert( np.isclose( np.sum(data[0,0,:,:]), 3, atol=1e-9 ) )
+    
+            
+            
+    
+        
+
+
+
+
+
+
+
+
+
+    
     
     

@@ -10,6 +10,16 @@ from libc.math cimport sin, cos, sqrt, floor, ceil, round, exp, fabs
 import sys
 import copy
 
+# Set the compile-time type of the working arrays for noise_gate_batch.
+# (This is a Cython optimization - types are used below)
+CDTYPE = np.complex128
+ctypedef np.complex128_t CDTYPE_t
+
+RDTYPE = np.float64
+ctypedef np.float64_t RDTYPE_t
+
+
+
 def shred(
         source,
         size,
@@ -56,10 +66,10 @@ def shred(
     # Detect dimensionality
     N = len(source.shape)
     
-    # "Thread" if a scalar is passed in for either size or step
-    if( len(size)==1 ):
+    # Promote to a 1-D numpy array (size N) if scalar
+    if( (not isinstance(size,np.ndarray)) or len(size)==1 ):
         size = size + np.zeros(N)
-    if( len(step)==1 ):
+    if( (not isinstance(step,np.ndarray)) or len(step)==1 ):
         step = step + np.zeros(N)
         
     # Make sure everything shook out to the right dimensionality
@@ -329,18 +339,22 @@ def hannify(source, order=2, axis=None, copy=False):
     sin function is scaled so that the center of the window is unity and the 
     wavelength is the same as the width of the window.
     
-    The "order" parameter permits other powers of sin to be used.
+    This is used because Hanning windows and variants thereof have nice 
+    summing properties, so if you choose the right offset between adjacent 
+    Hanning windows you don't have to do a scaled sum.  This kills two 
+    birds with one stone, for the noisegate algorithm:  it provides good 
+    apodization and also makes recombining the data better.
 
     Parameters
     ----------
     source :  Numpy array 
-    order : float, optional
-        This is the exponential order of the Hann window (default is 2)
     axis : None or int or list of ints
         This is the axis to which the Hann window should be applied.  if it is
         None, then the last N axes are used.
     copy : Boolean (default False)
-        Indicates whether the data should be copied before treatment
+        Indicates whether the data should be copied before treatment.  if False
+        (the default), then they are modified in place (and returned).  If True,
+        then they are copied and the copy gets modified and returned.
 
     Returns
     -------
@@ -355,42 +369,460 @@ def hannify(source, order=2, axis=None, copy=False):
             raise ValueError("hannify: if axis is not specified, source must have 2N axes")
         axis = list( range( N/2, N ) )
         
+    # Check for dups in the axis list and throw an error.  This is the st00pid
+    # way to work but axis is generally a short list so who cares
+    for axis1 in range( len(axis) ):
+        for axis2 in range(axis1+1, len(axis) ):
+            if(axis[axis1]==axis[axis2]):
+                raise ValueError("hannify: axis specifier must not contain dups")
+    
          
     if(copy):
         source = np.copy(source)
-            
-    for axis_i in axis:
-       
-        axes = list(range(N));
-        axes[axis_i]=N-1
-        axes[N-1]=axis_i
-        ss = np.transpose(source,axes=tuple(axes))
-        dex = np.mgrid[0:ss.shape[N-1]]
-        dex -= ss.shape[N-1]/2
-        dex *= np.pi/ss.shape[N-1]
         
-        window = sin(dex)
-        if(order==1):
-            pass
-        elif(order==2):
-            window *= window
-        elif(order==3):
-            window *= (window*window)
-        elif(order==4):
-             window *= window
-             window *= window
-        else:
-            window = window**order
-        
-        ss *= window
+    ### To minimize passes through the data, we assemble a filter array that
+    ### has as many axes as are called out in axis.  Then we transpose the 
+    ### original data to put the relevant axes at the back (this should be 
+    ### cheap in all cases and is a no-op in the default case).  Then we can
+    ### apply the window with a single broadcast multiply.
     
+    axis_sizes = [ source.shape[axis[i]] for i in range(len(axis)) ]
+    filt = np.ones(axis_sizes)
+
+    for axis_i in range( len(axis) ):
+        axes = list( range( len(axis) ) )
+        axes[ axis_i ]  = len(axis) - 1
+        axes[ -1 ]      = axis_i
+        fs = np.transpose( filt, axes=tuple( axes ) )
+        
+        # construct a sin^2 window.  Use cos^2 centered on the window,
+        # because it's a little cleaner analytically.
+        dex = np.mgrid[ 0 : fs.shape[ -1 ] ].astype(float)
+        dex -= fs.shape[ -1 ] / 2 - 0.5
+        dex *= np.pi / fs.shape[ -1 ]
+        window = np.cos(dex)
+        window *= window
+
+        # Broadcast multiply acts on the last dim of fs, which flows to filt
+        print(f"window shape is {window.shape}; fs shape is {fs.shape}, filt shape is {filt.shape}")
+        fs *= window
+        
+    # All the loop above was to generate a filter function acting on all the 
+    # axes called out in the "axis" list.  Now we have to make a window on source
+    # with all those axes at the end, so broadcasting works. 
+    #
+    # Strategy: start with all axes in order.  Walk through and do explicit
+    # exchanges until we have the right broadcast setup.
+    
+    axis_xpose_order = list( range( N ) )
+
+    for axis_i in range( len(axis) ):
+        if( axis_xpose_order[ - axis_i - 1 ] !=  axis[ - axis_i - 1 ] ):
+
+            for axis_j in range( N ):
+                if( axis_xpose_order [ axis_j ] == axis[ - axis_i - 1 ] ):
+                    # Exchange the two elements
+                    a = axis_xpose_order[ axis_j ]
+                    axis_xpose_order[ axis_j ] = axis_xpose_order [ -axis_i - 1 ]
+                    axis_xpose_order[ -axis_i - 1 ] = a
+                    break
+            else:
+               # None identified
+               raise ValueError("hannify: something went wrong with the axis transposition step")
+        
+    # Do the transpose to put all the active axes at the end, then 
+    # broadcast-multiply the filter.
+    ss = np.transpose( source, axes = axis_xpose_order )
+    print(f"source is {source.shape}; ss is {source.shape}; axis_xpose_order is {axis_xpose_order}; filt shape is {filt.shape}")
+    ss *= filt
+               
     return source
 
 
+# find_ng_spectrum is a hotspot so it should be fully cdeffed.  It isn't, since
+# the sorting means that vectorization cache-breakage doesn't cost all that much.
 
-                     
-        
-            
-            
-
+def get_noise_spectrum( source, 
+                    float pct=50, 
+                    float dkpct=5, 
+                    int   subsamp=2, 
+                    str   model='shot'):
+    '''
+    get_noise_spectrum - extract a noise spectrum from an already-cubified
+    3D data set.  Returns a dictionary containing the spectrum itself.  
     
+    The noise spectrum calculation follows the analysis in the DeForest 2017
+    paper.
+    
+    You should already have cubified and hannified the data for this call.
+    
+    find_spectrum is specifically for 3D work and therefore requires a 6D 
+    (cubified) input.
+
+    Parameters
+    ----------
+    source : numpy array (6D)
+        Cubified, hannified data set to use.  First 3 axes run across cubies,
+        last 3 axes are within each cubie.
+    pct : floating-point, optional
+        This is the percentile value of each Fourier component magnitude 
+        (considered as an ensemble across cubes and modified, if relevant,
+        with the shot noise estimator) to treat as the noise floor. The 
+        default is 50, which uses the median and is suitable for images that
+        are noise dominated in most Fourier components.
+    dkpct : For the hybrid mode, this specifies the percentile of each Fourier
+        component magnitude that is used for the constant term in the hybrid
+        model.  The default is 5, which gets the darkest portion of the image
+        sequence and is suitable for data sets in which a noticeable amount
+        of the data are dominated by dark noise effects.
+    model : string, optional
+        This is the noise model to use when finding the spectrum.  The default
+        is 'shot'.  Valid values are 'constant', 'multiplicative', 'shot', and
+        'hybrid [shot and constant]'.  Only the first character is used. 
+        The default is 'shot'.
+    subsamp : integer, optional
+        This is the stride to take through each cube axis.  Most data sets
+        have a large enough number of subcubes that subsampling can greatly
+        increase speed at no real cost in precision.  The default value of 2
+        speeds up spectrum extraction by a factor of 8
+
+    Returns
+    -------
+    A dictionary containing the spectrum, the dark spectrum if relevant, and
+    metadata about the cube size and mode.  The dictionary is suitable for
+    passing in to ng_batch or ng_sequence.
+
+    '''
+    if(not isinstance(source,np.ndarray)):
+        raise ValueError("get_noise_spectrum: source data must be a NumPy array")
+    if(len(source.shape) != 6):
+        raise ValueError("get_noise_spectrum: source data must have 6 dimensions")
+    if(dkpct >= 100 or dkpct < 0):
+        raise ValueError("get_noise_spectrum: dkpct is out of range [0,100)")
+    if(pct >= 100 or dkpct < 0):
+        raise ValueError("get_noise_spectrum: pct is out of rante [0,100)")
+        
+    # Output is a dictionary.  Populate as needed.
+    out = {'model':model}
+
+
+    # Subsample the cubies array and Fourier transform the subset.  We don't
+    # care about the absolute value so we just grab the phase.
+    # The "cubies" array is ( N, z, y, x ), where N is the number of cubies
+    # we're going to look at, and the other are dimensions of each cubie.
+    cubies = source[0::subsamp,0::subsamp,0::subsamp,...]. \
+        reshape([-1, source.shape[3], source.shape[4], source.shape[5]])
+
+    # Fourier transform is *after* the sum-of-square-roots in case we ever 
+    # decide to do it in-place.  This is really wasteful since the fft3
+    # converts everything to complex and also copies all the data.
+    fcubies = np.abs(np.fft.fftn(cubies,axes=(-3,-2,-1)))
+    
+    # use m as a shorthand
+    m = model
+
+    if( m[0] not in {'c','h','s','m'}):
+        raise ValueError("get_noise_spectrum: Mode must be constant, hybrid, shot, or multiplicative")
+
+    # Both constant and hybrid mode use a constant spectrum with no scaling.
+    # Accumulate that now, so we can scale (aka screw up) the fcubies spectra
+    # for the shot noise calculation later.
+    if(m[0] == 'c' or m[0] == 'h'):
+        if(m[0]=='h'):
+            frac = dkpct/100
+            out['const_pct'] = dkpct
+        else:
+            frac = pct/100
+            out['const_pct'] = pct
+        dex = np.floor(frac * fcubies.shape[0])
+         
+        fcubies.sort(axis=0)
+        out['const_spectrum'] = fcubies[dex,:,:,:]
+        
+    # Both shot and hybrid mode use sum-sqrt scaled spectra.
+    if(m[0] == 's' or m[0] == 'h'):
+        # Take the square root of each pixel and then sum over each cubie. 
+        # The cubies get clipped at 1e-20 since shot noise treats each value
+        # as positive-definite.
+        cubies_sumsqrt = np.sum(np.sqrt(cubies.clip(1e-20)),axis=[-3,-2,-1])
+
+        # reshape back to be broadcastable with fcubies, then scale the fcubies
+        fcubies /= cubies_sumsqrt.reshape([-1,1,1,1])
+        fcubies = fcubies.sort(axis=0)
+        
+        dex = np.floor( pct / 100 * fcubies.shape[0] )
+        
+        out['shot_spectrum'] = fcubies[dex,:,:,:]
+    
+    # multiplicative mode just scales by the average value..
+    if(m[0]=='m'):
+        # Since the Fourier transform found the average value already, 
+        # we just divide by that instead of calculating it again.
+        # divide by that. 
+        fcubies /= fcubies[:,0,0,0].reshape([-1,1,1,1])
+        fcubies = fcubies.sort(axis=0)
+        
+        dex = np.floor( pct/100 * fcubies.shape[0] )
+        
+        out['mult_spectrum'] = fcubies[dex,:,:,:]
+ 
+    return out
+
+def noise_gate_batch(
+        source,
+        float pct=50,
+        float dkpct=5,
+        float factor=2.0,
+        float dkfactor=2.0,
+        str method='gate',
+        str model='hybrid',
+        int cubesize=18,
+        int subsamp=2,
+        vignette=None,
+        spectrum=None,
+        ):
+    '''
+    noise_gate_batch - carry out noise gatng on an image sequence contained
+    in a 3D numpy array.  Returns the modified array.
+    
+    The noise gating follows the analysis in the DeForest 2017 paper.
+    
+    the data are cubified nto neighborhoods and subjected to Hann windowing,
+    then (if necessary) sent to the noise spectrum estimator 
+    (get_noise_spectrum).  Then the cubified data are compared to the noise 
+    spectrum and filtered with a locally constructed adaptive filter that keeps 
+    the significant terms in the local neighborhood Fourier transform around 
+    each point.  Finally the cubies are reassembled to match the original data.
+    
+    Specific algorithmic adjustments are described in the parameters section 
+    below
+    
+    The cubification strategy uses the identity that 
+        sum(x=0,2π/3,4π/3) sin^4 (x + z) = 1.125
+    to merge apodization and recombination.  The neighborhoods are subsampled by
+    a factor of 3, and offset-summed to reconstitute the original data.  this
+    means that a margin near each boundary of the data set remains apodized.
+    
+
+    Parameters
+    ----------
+    source : Numpy array with 3 dimensions
+        This is a Numpy array containing the source data.  Only 3 dimensions
+        are supported at the moment:  t, y, x.
+    pct : float, optional
+        The neighborhoods (cubies) in the data are treated as an ensemble, and
+        scaled Fourier components are used to estimate noise level.  This is the
+        percentile value (across neighborhoods) of each Fourier component, that
+        is considered to be a noise level threshold.  The default value of 50
+        assumes that most Fourier components are noise dominated in most
+        locations of the image.  Lower values should be used for processing less 
+        noisy image sets.
+    dkpct : float, optional
+        This works as pct, but for estimating dark noise.  The default value 
+        of 5 assumes that the fifth-percentile value (across neighborhoods) of 
+        any given Fourier component can be treated as the dark noise level.
+        Dark noise is relevant for the "hybrid" noise model only.
+    factor : float, optional
+        This is the factor by which a Fourier component magnitude must exceed 
+        its corresponding noise-model value, to be retained in the output 
+        data.  The default value of 2 keeps approximately 3% of the background
+        noise spuriously (2 sigma); this seems to be a good compromise between
+        retaining noise and rejecting weak image features, for many applications.
+    float dkfactor : TYPE, optional
+        This is similar to the 'factor' parameter, but applies to dark noise
+        in the hybrid noise model.
+    method : string, optional
+        This describes the filtering method used to handle neighborhood Fourier
+        components that do not rise significantly above the noise model.  
+        Accepted values are:
+            gate: causes simple gating:  Fourier components that do not 
+               significantly exceed the noise floor are explicitly set to 0
+            wiener: causes a Wiener filter to be applied, with rollover at the
+               significance threshold ('factor' parameter times the noise model).
+        The default is 'gate'.
+    model : string, optional
+        This describes the noise model to be used for the source data. The noise
+        model describes how noise is expected to vary as a function of image
+        characteristics.  Accepted values are:
+            constant: the dominant noise source is considered to be independent
+               of image value.  This is suitable for data, such as solar 
+               magnetograms or dark-noise-limited images in general, that are
+               dominated by an additive noise source independent of image value.
+            shot: the dominant noise source is considered to scale like the 
+               square root of image value, like Poisson "shot" noise from 
+               photon counting
+            hybrid: two noise sources are considered:  shot noise, and also a
+               dark noise "floor" in dark portions of the image.  This is the
+               most commonly applicable model for direct scientific images 
+               that are shot noise limited with an APS or CCD detector.
+            multiplicative: the dominant noise term is considered to be a 
+               constant multiplicative noise source or, equivalently, an 
+               additive noise source whose RMS value scales with image value.
+        The default is "hybrid".
+    cubesize : int, optional
+        This is the number of pixels in a neighborhood ('cubie') to be considered
+        for a local adaptive filter.  The number must be divisible by 3.  You 
+        can specify either a single integer, in which case the neighborhoods are
+        cubical, or an array of three values in (t, y, x) order, in which case
+        the neighborhoods can have separate size along each axis. For maximum
+        noise reduction the neighborhood should be comparable to the maximum
+        coherence length in the data.  For data that include rapidly moving
+        features which do not, themselves, evolve rapidly, you should consider
+        matching the t size to the x and y sizes, based on the expected speed
+        of the features.
+    subsamp : int, optional
+        This allows the noise-spectrum estimator to subsample the cubies data 
+        by the specified factor along each axis, saving computing time. The 
+        default is 2, which reduces the number of Fourier transforms for this 
+        step by a factor of 8.  
+    spectrum : dictionary, optional
+        If present, this should be a dictionary returned by get_noise_spectrum.
+        If not present, a new noise spectrum is calculated for this batch.  
+        Since the noise spectrum model is constant for each instrument 
+        configuration, there is no nead to recalculate the spectrum for 
+        different batches processed as part of a larger data set; this
+        parameter lets you explicitly calculate a spectrum first, then call
+        noise_gate_batch multiple times to process a data set too large to 
+        fit in memory simultaneously.
+    vignette : numpy 2-D array or none
+        If supplied, this is a vignetting function of the instrument. The data
+        are assumed to be already corrected for vignetting, so they are scaled 
+        by the vignetting function before processing, then it is removed after
+        processing.  This produces better uniformity of noise characeristics in,
+        e.g., coronagraphs that use vignetting to reduce detector dynamic range.
+
+        
+    Returns
+    -------
+    A numpy array matching the source array, containing the cleaned-up data.
+
+    '''
+ 
+    # use m as a shorthand for the model
+    m = model
+    
+    if( m[0] not in {"c","h","s","m"}):
+       raise ValueError("noise_gate_batch: Mode must be constant, hybrid, shot, or multiplicative")
+  
+ 
+    if( (spectrum is not None) and (spectrum['model'] != m)):
+        raise ValueError("noise_gate_batch: spectrum mode must match gating mode")
+    
+    # Check for  vignetting function if present, and decorrect
+    if( vignette is not None ):
+        source *= vignette
+    
+    # Cut up the data -- have to do this first, in case we call get_noise_spectrum.
+    cubies = shred(source, cubesize, cubesize/3)
+    hannify(cubies)
+
+    # Call get_noise_spectrum if necessary
+    if(spectrum is None):
+        spectrum = get_noise_spectrum(cubies, pct=pct, dkpct=dkpct, subsamp=subsamp, model=model)
+        
+    # Now drop into the optimized central loop to do the gating.  These are
+    # separate routines to provide all-cdef variables that Cython needs for 
+    # best optimization.
+    if(m[0] =='c'):
+        noise_gate_const(cubies, spectrum['const_spectrum'], factor, method[0])
+    elif(m[0]=='h'):
+        noise_gate_hybrid(cubies, spectrum['const_spectrum'],spectrum['shot_spectrum'], factor, dkfactor, method[0])
+    elif(m[0]=='s'):
+        noise_gate_shot(cubies, spectrum['shot_spectrum'], factor, method[0]);
+    elif(m[0]=='m'):
+        noise_gate_mult(cubies, spectrum['mult_spectrum'], factor, method[0]);
+    else:
+        raise AssertionError("noise_gate_batch: this never happens")
+    
+    # Do the second apodization and reconstitute.  The 1.125 comes from the
+    # trig identity sum{i=0,2}{sin(x+2*i*PI/3)**4} = 1.125
+    hannify(cubies);
+    out = unshred(cubies) / 1.125
+    
+    return out
+
+
+#####################
+# These noise_gate_<method> routines are broken out so that Cython can fully
+# compile them.  But they're not as fully optimized as they could be.  In 
+# particular, the fastest algorithm would dip into C and use pointer increment
+# operations instead of indexing calculations for every array index.
+#
+# Maybe fast enough for now; maybe needs to be refined later.
+#
+# Note the dimensionality spec -- Cythonic optimization that allows direct
+# indexing instead of object access.
+cdef noise_gate_const(np.ndarray[RDTYPE_t, ndim=6] cubies, 
+                      np.ndarray[RDTYPE_t, ndim=6] const_spec, 
+                      float factor, 
+                      char method ):
+    assert cubies.dtype == RDTYPE
+    assert const_spec.dtype == RDTYPE
+    assert (method=='g' or method=='w')
+    
+    cdef int ch_z, ch_y, ch_x
+    cdef int max_z = cubies.shape[0]  # max_{xyz} indexes cubes
+    cdef int max_y = cubies.shape[1]
+    cdef int max_x = cubies.shape[2]
+    cdef int siz_z = cubies.shape[3]  # siz_{xyz} indexes within each cube
+    cdef int siz_y = cubies.shape[4]
+    cdef int siz_x = cubies.shape[5]
+    cdef int z,y,x
+    cdef float snr, wf
+    
+    
+    # Note 
+    cdef np.ndarray[RDTYPE_t,ndim=3] c_spec = const_spec * factor
+    cdef np.ndarray[RDTYPE_t,ndim=3] tmp_scale = np.zeros([siz_z,siz_y,siz_x],dtype=RDTYPE)
+    cdef np.ndarray[CDTYPE_t,ndim=3] tmp_spec
+    
+  
+    for ch_z in range(max_z):
+        for ch_y in range(max_y):
+            for ch_x in range(max_x):
+                # fftn call drops into Python.  Not the very hottest of hot
+                # spots (that's inside the zyx loops) but not great either.  
+                # This is where dropping into C and calling fftw3 might
+                # help.
+                tmp_spec = np.fft.fftn(cubies[ch_z,ch_y,ch_x],axes=(0,1,2))
+                tmp_scale = np.abs(tmp_spec)
+                
+                # Explicit full Cythonized loop over interior -- is this 
+                # better than implicit?  Dunno.  Docs say it is.
+                if(method=='g'):
+                    for z in range(siz_z):
+                        for y in range(siz_y):
+                            for x in range(siz_x):
+                                if(tmp_scale[z,y,x] < c_spec[z,y,x]):
+                                    tmp_spec[z,y,x] = 0
+                elif(method=='w'):
+                    for z in range(siz_z):
+                        for y in range(siz_y):
+                            for x in range(siz_x):
+                                snr = tmp_scale[z,y,x] / c_spec[z,y,x]
+                                wf = snr/(snr+1)
+                                tmp_spec[z,y,x] = tmp_spec[z,y,x]*wf
+                                
+                # Dropping into Python to de-fft and stuff the value back into
+                # the original cubies array.
+                cubies[ch_z,ch_y,ch_x] = np.fft.ifftn(tmp_spec,axis=(0,1,2))
+    
+cdef noise_gate_hybrid(np.ndarray cubies, 
+                      np.ndarray const_spec, 
+                      np.ndarray shot_spec,
+                      float dkfactor,
+                      float factor, 
+                      char method ):  
+    pass
+
+cdef noise_gate_shot(np.ndarray cubies, 
+                      np.ndarray shot_spec, 
+                      float factor, 
+                      char method ):
+    pass
+
+cdef noise_gate_mult(np.ndarray cubies, 
+                      np.ndarray mult, 
+                      float factor, 
+                      char method ):     
+    pass
