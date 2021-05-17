@@ -448,7 +448,7 @@ def hannify(source, order=2, axis=None, copy=False):
     return source
 
 
-# find_ng_spectrum is a hotspot so it should be fully cdeffed.  It isn't, since
+# get_noise_spectrum is a hotspot so it should be fully cdeffed.  It isn't, since
 # the sorting means that vectorization cache-breakage doesn't cost all that much.
 
 def get_noise_spectrum( source, 
