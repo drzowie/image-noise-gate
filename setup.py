@@ -4,6 +4,11 @@
 # Note: To use the 'upload' functionality of this file, you must:
 #   $ pipenv install twine --dev
 
+#
+# To develop:  "python setup.py develop"
+# To build (pre-install): "python setup.py build"
+# To install: "python setup.py install"
+
 import io
 import os
 import sys
