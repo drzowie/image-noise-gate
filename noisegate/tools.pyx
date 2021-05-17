@@ -9,6 +9,7 @@ cimport cython
 from libc.math cimport sin, cos, sqrt, floor, ceil, round, exp, fabs
 import sys
 import copy
+from warnings import warn
 
 # Set the compile-time type of the working arrays for noise_gate_batch.
 # (This is a Cython optimization - types are used below)
@@ -31,7 +32,7 @@ def shred(
     
     If size and/or step are array-like objects then they must have exactly N
     elements.  If either one is a scalar, it is copied N times.
-    
+        
     Limitation
     ----------
      In the current implementation, N must be between 1 and 4.
@@ -55,7 +56,7 @@ def shred(
     
     #
     # CED - separate cases because they'll run faster, I think, than a 
-    # single general-purpose case unless I drop all the way in to C.  But 
+    # single general-purpose case unless I drop all the way into C.  But 
     # the API is unified in case I (or you) later think of a general-purpose 
     # way of doing this that is more elegant.
     #
@@ -85,7 +86,7 @@ def shred(
         
     if(N==1):
         (xsize,xstep) = (size[0],step[0])
-        chunk_x_count = np.floor((source.shape[0]-xsize+1)/xstep).astype(int)
+        chunk_x_count = np.floor((source.shape[0]-xsize)/xstep).astype(int)+1
         
         output = np.empty([chunk_x_count, xsize],dtype=float,order='C')
 
@@ -126,9 +127,9 @@ def shred(
         ( ysize, ystep ) = ( size[1], step[1] )
         ( zsize, zstep ) = ( size[0], step[0] )
         
-        chunk_x_count = np.floor((source.shape[2]-xsize+1)/xstep).astype(int)
-        chunk_y_count = np.floor((source.shape[1]-ysize+1)/ystep).astype(int)
-        chunk_z_count = np.floor((source.shape[0]-zsize+1)/zstep).astype(int)
+        chunk_x_count = 1+np.floor((source.shape[2]-xsize)/xstep).astype(int)
+        chunk_y_count = 1+np.floor((source.shape[1]-ysize)/ystep).astype(int)
+        chunk_z_count = 1+np.floor((source.shape[0]-zsize)/zstep).astype(int)
     
         output = np.empty(  [ chunk_z_count, chunk_y_count, chunk_x_count,
                               zsize,         ysize,         xsize
@@ -229,7 +230,7 @@ def unshred(
         raise ValueError("unshred: source array must have 2N axes")
     N = NN/2
     
-    if(len(step)==1):
+    if(not isinstance(step,np.ndarray) or len(step)==1):
         step = np.zeros(N)+step
     
     if(len(step) != N):
@@ -364,10 +365,12 @@ def hannify(source, order=2, axis=None, copy=False):
     cdef int axis_i
     cdef int N = len( source.shape )
     
-    if(axis==None):
+    default_axis = (axis==None)
+    if(default_axis):
         if( N % 2):
             raise ValueError("hannify: if axis is not specified, source must have 2N axes")
         axis = list( range( N/2, N ) )
+    
         
     # Check for dups in the axis list and throw an error.  This is the st00pid
     # way to work but axis is generally a short list so who cares
@@ -397,43 +400,49 @@ def hannify(source, order=2, axis=None, copy=False):
         
         # construct a sin^2 window.  Use cos^2 centered on the window,
         # because it's a little cleaner analytically.
-        dex = np.mgrid[ 0 : fs.shape[ -1 ] ].astype(float)
+        dex = np.arange(fs.shape[-1]).astype(float)
         dex -= fs.shape[ -1 ] / 2 - 0.5
         dex *= np.pi / fs.shape[ -1 ]
         window = np.cos(dex)
         window *= window
 
         # Broadcast multiply acts on the last dim of fs, which flows to filt
-        print(f"window shape is {window.shape}; fs shape is {fs.shape}, filt shape is {filt.shape}")
         fs *= window
         
     # All the loop above was to generate a filter function acting on all the 
     # axes called out in the "axis" list.  Now we have to make a window on source
-    # with all those axes at the end, so broadcasting works. 
+    # with all those axes at the end, so broadcasting works.
+    #
+    # We only bother with all that if the axis field was specified since
+    # in the default case they're in the right order already.
     #
     # Strategy: start with all axes in order.  Walk through and do explicit
     # exchanges until we have the right broadcast setup.
-    
-    axis_xpose_order = list( range( N ) )
-
-    for axis_i in range( len(axis) ):
-        if( axis_xpose_order[ - axis_i - 1 ] !=  axis[ - axis_i - 1 ] ):
-
-            for axis_j in range( N ):
-                if( axis_xpose_order [ axis_j ] == axis[ - axis_i - 1 ] ):
-                    # Exchange the two elements
-                    a = axis_xpose_order[ axis_j ]
-                    axis_xpose_order[ axis_j ] = axis_xpose_order [ -axis_i - 1 ]
-                    axis_xpose_order[ -axis_i - 1 ] = a
-                    break
-            else:
-               # None identified
-               raise ValueError("hannify: something went wrong with the axis transposition step")
+    if default_axis:
         
+        ss = source
+        
+    else:
+        
+        axis_xpose_order = list( range( N ) )
+        for axis_i in range( len(axis) ):
+            if( axis_xpose_order[ - axis_i - 1 ] !=  axis[ - axis_i - 1 ] ):
+
+                for axis_j in range( N ):
+                    if( axis_xpose_order [ axis_j ] == axis[ - axis_i - 1 ] ):
+                        # Exchange the two elements
+                        a = axis_xpose_order[ axis_j ]
+                        axis_xpose_order[ axis_j ] = axis_xpose_order [ -axis_i - 1 ]
+                        axis_xpose_order[ -axis_i - 1 ] = a
+                        break
+                    else:
+                        # None identified
+                        raise ValueError("hannify: something went wrong with the axis transposition step")
+        ss = np.transpose( source, axes = axis_xpose_order )
+        print(f"hannify: xpose order is {axis_xpose_order}")
+    
     # Do the transpose to put all the active axes at the end, then 
     # broadcast-multiply the filter.
-    ss = np.transpose( source, axes = axis_xpose_order )
-    print(f"source is {source.shape}; ss is {source.shape}; axis_xpose_order is {axis_xpose_order}; filt shape is {filt.shape}")
     ss *= filt
                
     return source
@@ -507,7 +516,7 @@ def get_noise_spectrum( source,
 
 
     # Subsample the cubies array and Fourier transform the subset.  We don't
-    # care about the absolute value so we just grab the phase.
+    # care about the phase so we just grab magnitude ('abs').
     # The "cubies" array is ( N, z, y, x ), where N is the number of cubies
     # we're going to look at, and the other are dimensions of each cubie.
     cubies = source[0::subsamp,0::subsamp,0::subsamp,...]. \
@@ -521,7 +530,7 @@ def get_noise_spectrum( source,
     # use m as a shorthand
     m = model
 
-    if( m[0] not in {'c','h','s','m'}):
+    if( m[0] not in {'c','h','s','m','n'}):
         raise ValueError("get_noise_spectrum: Mode must be constant, hybrid, shot, or multiplicative")
 
     # Both constant and hybrid mode use a constant spectrum with no scaling.
@@ -534,7 +543,7 @@ def get_noise_spectrum( source,
         else:
             frac = pct/100
             out['const_pct'] = pct
-        dex = np.floor(frac * fcubies.shape[0])
+        dex = np.floor(frac * fcubies.shape[0]).astype(int)
          
         fcubies.sort(axis=0)
         out['const_spectrum'] = fcubies[dex,:,:,:]
@@ -544,13 +553,12 @@ def get_noise_spectrum( source,
         # Take the square root of each pixel and then sum over each cubie. 
         # The cubies get clipped at 1e-20 since shot noise treats each value
         # as positive-definite.
-        cubies_sumsqrt = np.sum(np.sqrt(cubies.clip(1e-20)),axis=[-3,-2,-1])
+        cubies_sumsqrt = np.sum(np.sqrt(cubies.clip(1e-20)),axis=(-1,-2,-3))
 
         # reshape back to be broadcastable with fcubies, then scale the fcubies
         fcubies /= cubies_sumsqrt.reshape([-1,1,1,1])
-        fcubies = fcubies.sort(axis=0)
-        
-        dex = np.floor( pct / 100 * fcubies.shape[0] )
+        fcubies.sort(axis=0)
+        dex = np.floor( pct / 100 * fcubies.shape[0] ).astype(int)
         
         out['shot_spectrum'] = fcubies[dex,:,:,:]
     
@@ -560,13 +568,15 @@ def get_noise_spectrum( source,
         # we just divide by that instead of calculating it again.
         # divide by that. 
         fcubies /= fcubies[:,0,0,0].reshape([-1,1,1,1])
-        fcubies = fcubies.sort(axis=0)
+        fcubies.sort(axis=0)
         
         dex = np.floor( pct/100 * fcubies.shape[0] )
         
         out['mult_spectrum'] = fcubies[dex,:,:,:]
  
     return out
+
+
 
 def noise_gate_batch(
         source,
@@ -701,10 +711,18 @@ def noise_gate_batch(
     # use m as a shorthand for the model
     m = model
     
-    if( m[0] not in {"c","h","s","m"}):
+    if( m[0] not in {"c","h","s","m","n"}):
        raise ValueError("noise_gate_batch: Mode must be constant, hybrid, shot, or multiplicative")
   
- 
+    cdef int m2
+    if(method[0]=='g'):
+        m2 = 0
+    elif(method[0]=='w'):
+        m2 = 1
+    else:
+        raise ValueError("noise_gate_batch: method must be gate or wiener")
+        
+        
     if( (spectrum is not None) and (spectrum['model'] != m)):
         raise ValueError("noise_gate_batch: spectrum mode must match gating mode")
     
@@ -718,26 +736,35 @@ def noise_gate_batch(
 
     # Call get_noise_spectrum if necessary
     if(spectrum is None):
-        spectrum = get_noise_spectrum(cubies, pct=pct, dkpct=dkpct, subsamp=subsamp, model=model)
+        spectrum = get_noise_spectrum(cubies, pct=pct, dkpct=dkpct, 
+                                      subsamp=subsamp, model=model)
         
     # Now drop into the optimized central loop to do the gating.  These are
     # separate routines to provide all-cdef variables that Cython needs for 
     # best optimization.
     if(m[0] =='c'):
-        noise_gate_const(cubies, spectrum['const_spectrum'], factor, method[0])
+        noise_gate_const(cubies, spectrum['const_spectrum'], factor, m2)
+        
     elif(m[0]=='h'):
-        noise_gate_hybrid(cubies, spectrum['const_spectrum'],spectrum['shot_spectrum'], factor, dkfactor, method[0])
+        noise_gate_hybrid(cubies, spectrum['const_spectrum'],spectrum['shot_spectrum'], 
+                          factor, dkfactor, m2)
     elif(m[0]=='s'):
-        noise_gate_shot(cubies, spectrum['shot_spectrum'], factor, method[0]);
+        noise_gate_shot(cubies, spectrum['shot_spectrum'], factor, m2)
+        
     elif(m[0]=='m'):
-        noise_gate_mult(cubies, spectrum['mult_spectrum'], factor, method[0]);
-    else:
-        raise AssertionError("noise_gate_batch: this never happens")
+        noise_gate_mult(cubies, spectrum['mult_spectrum'], factor, m2)
+        
+    elif(m[0]=='n'):
+        warn("noise_gate_batch: model 'none' selected; ignoring gating step")
     
     # Do the second apodization and reconstitute.  The 1.125 comes from the
-    # trig identity sum{i=0,2}{sin(x+2*i*PI/3)**4} = 1.125
+    # trig identity sum{i=0,1,2}{sin(x+2*i*PI/3)**4} = 1.125
+    # The cube is because we're working in three axes.
     hannify(cubies);
-    out = unshred(cubies) / 1.125
+    out = unshred(cubies,cubesize/3) / (1.125**3)
+    
+    if( vignette is not None ):
+        source /= (vignette + (vignette==0))
     
     return out
 
@@ -752,13 +779,17 @@ def noise_gate_batch(
 #
 # Note the dimensionality spec -- Cythonic optimization that allows direct
 # indexing instead of object access.
+#
+# method is 0 for gating, 1 for wiener
+#
 cdef noise_gate_const(np.ndarray[RDTYPE_t, ndim=6] cubies, 
-                      np.ndarray[RDTYPE_t, ndim=6] const_spec, 
+                      np.ndarray[RDTYPE_t, ndim=3] const_spec, 
                       float factor, 
-                      char method ):
+                      int method):
     assert cubies.dtype == RDTYPE
     assert const_spec.dtype == RDTYPE
-    assert (method=='g' or method=='w')
+    
+    assert(method==0 or method==1)
     
     cdef int ch_z, ch_y, ch_x
     cdef int max_z = cubies.shape[0]  # max_{xyz} indexes cubes
@@ -771,7 +802,8 @@ cdef noise_gate_const(np.ndarray[RDTYPE_t, ndim=6] cubies,
     cdef float snr, wf
     
     
-    # Note 
+    # We prepare the spectrum by prescaling with factor ot avoid a mult in the
+    # hotspot.  Also allocate a single complex spectrum and scalar cubie workspace.
     cdef np.ndarray[RDTYPE_t,ndim=3] c_spec = const_spec * factor
     cdef np.ndarray[RDTYPE_t,ndim=3] tmp_scale = np.zeros([siz_z,siz_y,siz_x],dtype=RDTYPE)
     cdef np.ndarray[CDTYPE_t,ndim=3] tmp_spec
@@ -789,13 +821,13 @@ cdef noise_gate_const(np.ndarray[RDTYPE_t, ndim=6] cubies,
                 
                 # Explicit full Cythonized loop over interior -- is this 
                 # better than implicit?  Dunno.  Docs say it is.
-                if(method=='g'):
+                if(method==0):
                     for z in range(siz_z):
                         for y in range(siz_y):
                             for x in range(siz_x):
                                 if(tmp_scale[z,y,x] < c_spec[z,y,x]):
                                     tmp_spec[z,y,x] = 0
-                elif(method=='w'):
+                elif(method==1):
                     for z in range(siz_z):
                         for y in range(siz_y):
                             for x in range(siz_x):
@@ -805,7 +837,7 @@ cdef noise_gate_const(np.ndarray[RDTYPE_t, ndim=6] cubies,
                                 
                 # Dropping into Python to de-fft and stuff the value back into
                 # the original cubies array.
-                cubies[ch_z,ch_y,ch_x] = np.fft.ifftn(tmp_spec,axis=(0,1,2))
+                cubies[ch_z,ch_y,ch_x] = np.fft.ifftn(tmp_spec,axes=(0,1,2)).astype(float)
     
 cdef noise_gate_hybrid(np.ndarray cubies, 
                       np.ndarray const_spec, 
@@ -813,16 +845,190 @@ cdef noise_gate_hybrid(np.ndarray cubies,
                       float dkfactor,
                       float factor, 
                       char method ):  
-    pass
+    assert cubies.dtype == RDTYPE
+    assert const_spec.dtype == RDTYPE
+    assert shot_spec.dtype==RDTYPE
+    
+    assert(method==0 or method==1)
+    
+    cdef int ch_z, ch_y, ch_x
+    cdef int max_z = cubies.shape[0]  # max_{xyz} indexes cubes
+    cdef int max_y = cubies.shape[1]
+    cdef int max_x = cubies.shape[2]
+    cdef int siz_z = cubies.shape[3]  # siz_{xyz} indexes within each cube
+    cdef int siz_y = cubies.shape[4]
+    cdef int siz_x = cubies.shape[5]
+    cdef int z,y,x
+    cdef float snr, wf
+    cdef float sumsqrt
+    
+    # We prepare the spectrum by prescaling with factor to avoid a mult in the
+    # hotspot.  Also allocate a single complex spectrum and scalar cubie workspace.
+    cdef np.ndarray[RDTYPE_t,ndim=3] c_spec = const_spec * dkfactor
+    cdef np.ndarray[RDTYPE_t,ndim=3] s_spec = shot_spec * factor
+    cdef np.ndarray[RDTYPE_t,ndim=3] tmp_scale = np.zeros([siz_z,siz_y,siz_x],dtype=RDTYPE)
+    cdef np.ndarray[CDTYPE_t,ndim=3] tmp_spec, tmp_cube
+
+    for ch_z in range(max_z):
+        for ch_y in range(max_y):
+            for ch_x in range(max_x):
+                # fftn call drops into Python.  Not the very hottest of hot
+                # spots (that's inside the zyx loops) but not great either.  
+                # This is where dropping into C and calling fftw3 might
+                # help.
+                tmp_spec = np.fft.fftn(cubies[ch_z,ch_y,ch_x],axes=(0,1,2))
+                tmp_scale = np.abs(tmp_spec)
+                
+                # Get the sum-of-square-roots.  Probably needs to be 
+                # done in C (like the above) for maximum speed.
+                sumsqrt = np.sum(np.sqrt(np.abs(cubies[ch_z,ch_y,ch_x])))
+                
+                # Explicit full Cythonized loop over interior -- is this 
+                # better than implicit?  Dunno.  Docs say it is.
+
+                if(method==0):
+                    for z in range(siz_z):
+                        for y in range(siz_y):
+                            for x in range((z==0 and y==0),siz_x):
+                                if(tmp_scale[z,y,x] < c_spec[z,y,x] or 
+                                   tmp_scale[z,y,x] < sumsqrt * s_spec[z,y,x]
+                                   ):
+                                    tmp_spec[z,y,x] = 0
+
+                elif(method==1):
+                    for z in range(siz_z):
+                        for y in range(siz_y):
+                            for x in range((z==0 and y==0),siz_x):
+                                snr = tmp_scale[z,y,x] / (c_spec[z,y,x]**2 + (s_spec[z,y,x]*sumsqrt)**2)**0.5
+                                wf = snr/(snr+1)
+                                tmp_spec[z,y,x] = tmp_spec[z,y,x]*wf
+                                
+                # Dropping into Python again to de-fft and stuff the value back into
+                # the original cubies array.
+                cubies[ch_z,ch_y,ch_x] = np.fft.ifftn(tmp_spec,axes=(0,1,2)).astype(float)
+
+    
 
 cdef noise_gate_shot(np.ndarray cubies, 
                       np.ndarray shot_spec, 
                       float factor, 
                       char method ):
-    pass
+    assert cubies.dtype == RDTYPE
+    assert shot_spec.dtype == RDTYPE
+    
+    assert(method==0 or method==1)
+    
+    cdef int ch_z, ch_y, ch_x
+    cdef int max_z = cubies.shape[0]  # max_{xyz} indexes cubes
+    cdef int max_y = cubies.shape[1]
+    cdef int max_x = cubies.shape[2]
+    cdef int siz_z = cubies.shape[3]  # siz_{xyz} indexes within each cube
+    cdef int siz_y = cubies.shape[4]
+    cdef int siz_x = cubies.shape[5]
+    cdef int z,y,x
+    cdef float snr, wf
+    cdef float sumsqrt
+    
+    # We prepare the spectrum by prescaling with factor to avoid a mult in the
+    # hotspot.  Also allocate a single complex spectrum and scalar cubie workspace.
+    cdef np.ndarray[RDTYPE_t,ndim=3] s_spec = shot_spec * factor
+    cdef np.ndarray[RDTYPE_t,ndim=3] tmp_scale = np.zeros([siz_z,siz_y,siz_x],dtype=RDTYPE)
+    cdef np.ndarray[CDTYPE_t,ndim=3] tmp_spec, tmp_cube
+
+    for ch_z in range(max_z):
+        for ch_y in range(max_y):
+            for ch_x in range(max_x):
+                # fftn call drops into Python.  Not the very hottest of hot
+                # spots (that's inside the zyx loops) but not great either.  
+                # This is where dropping into C and calling fftw3 might
+                # help.
+                tmp_spec = np.fft.fftn(cubies[ch_z,ch_y,ch_x],axes=(0,1,2))
+                tmp_scale = np.abs(tmp_spec)
+                
+                # Get the sum-of-square-roots.  Probably needs to be 
+                # done in C (like the above) for maximum speed.
+                sumsqrt = np.sum(np.sqrt(np.abs(cubies[ch_z,ch_y,ch_x])))
+                
+                # Explicit full Cythonized loop over interior -- is this 
+                # better than implicit?  Dunno.  Docs say it is.
+
+                if(method==0):
+                    for z in range(siz_z):
+                        for y in range(siz_y):
+                            for x in range((z==0 and y==0),siz_x):
+                                if(tmp_scale[z,y,x] < sumsqrt * s_spec[z,y,x]
+                                   ):
+                                    tmp_spec[z,y,x] = 0
+
+                elif(method==1):
+                    for z in range(siz_z):
+                        for y in range(siz_y):
+                            for x in range((z==0 and y==0),siz_x):
+                                snr = tmp_scale[z,y,x] / (s_spec[z,y,x]*sumsqrt)
+                                wf = snr/(snr+1)
+                                tmp_spec[z,y,x] = tmp_spec[z,y,x]*wf
+                                
+                # Dropping into Python again to de-fft and stuff the value back into
+                # the original cubies array.
+                cubies[ch_z,ch_y,ch_x] = np.fft.ifftn(tmp_spec,axes=(0,1,2)).astype(float)
+
 
 cdef noise_gate_mult(np.ndarray cubies, 
-                      np.ndarray mult, 
+                      np.ndarray mult_spec, 
                       float factor, 
                       char method ):     
-    pass
+    assert cubies.dtype == RDTYPE
+    assert mult_spec.dtype == RDTYPE
+    
+    assert(method==0 or method==1)
+    
+    cdef int ch_z, ch_y, ch_x
+    cdef int max_z = cubies.shape[0]  # max_{xyz} indexes cubes
+    cdef int max_y = cubies.shape[1]
+    cdef int max_x = cubies.shape[2]
+    cdef int siz_z = cubies.shape[3]  # siz_{xyz} indexes within each cube
+    cdef int siz_y = cubies.shape[4]
+    cdef int siz_x = cubies.shape[5]
+    cdef int z,y,x
+    cdef float snr, wf
+    
+    # We prepare the spectrum by prescaling with factor to avoid a mult in the
+    # hotspot.  Also allocate a single complex spectrum and scalar cubie workspace.
+    cdef np.ndarray[RDTYPE_t,ndim=3] m_spec = mult_spec * factor
+    cdef np.ndarray[RDTYPE_t,ndim=3] tmp_scale = np.zeros([siz_z,siz_y,siz_x],dtype=RDTYPE)
+    cdef np.ndarray[CDTYPE_t,ndim=3] tmp_spec, tmp_cube
+
+    for ch_z in range(max_z):
+        for ch_y in range(max_y):
+            for ch_x in range(max_x):
+                # fftn call drops into Python.  Not the very hottest of hot
+                # spots (that's inside the zyx loops) but not great either.  
+                # This is where dropping into C and calling fftw3 might
+                # help.
+                tmp_spec = np.fft.fftn(cubies[ch_z,ch_y,ch_x],axes=(0,1,2))
+                tmp_scale = np.abs(tmp_spec)
+                
+                # Explicit full Cythonized loop over interior -- is this 
+                # better than implicit?  Dunno.  Docs say it is.
+                # The fillip in the x loop prevents scrozzling the origin component.
+
+                if(method==0):
+                    for z in range(siz_z):
+                        for y in range(siz_y):
+                            for x in range((z==0 and y==0),siz_x):
+                                if(tmp_scale[z,y,x] < tmp_scale[0,0,0] * m_spec[z,y,x]
+                                   ):
+                                    tmp_spec[z,y,x] = 0
+
+                elif(method==1):
+                    for z in range(siz_z):
+                        for y in range(siz_y):
+                            for x in range((z==0 and y==0),siz_x):
+                                snr = tmp_scale[z,y,x] / (tmp_scale[0,0,0] * m_spec[z,y,x])
+                                wf = snr/(snr+1)
+                                tmp_spec[z,y,x] = tmp_spec[z,y,x]*wf
+                                
+                # Dropping into Python again to de-fft and stuff the value back into
+                # the original cubies array.
+                cubies[ch_z,ch_y,ch_x] = np.fft.ifftn(tmp_spec,axes=(0,1,2)).astype(float)
+

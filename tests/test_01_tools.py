@@ -8,6 +8,7 @@ Created on Tue Mar 16 10:59:31 2021
 
 import noisegate as ng
 import numpy as np
+from warnings import warn
 
 def test_001_shred():
     # 1-D: 10-grid, 0 to 9 
@@ -145,20 +146,17 @@ def test_003_hannify():
         atol=1e-9
         ) ) )
     assert( np.isclose( np.sum(data[0,0,:,:]), 3, atol=1e-9 ) )
+
+def test_004_shred_hannify_unshred():
+    data = np.ones([108,108,108])
     
-            
-            
-    
+    for i in (1,2,3,4,6):
+        chunksize = i*3
+        dcubes = ng.shred(data,chunksize,i)
+        ng.hannify(dcubes)
+        ng.hannify(dcubes)
+        d2 = ng.unshred(dcubes,i) / (1.125**3)
+        print(f"i is {i}; chunksize is {chunksize}; dcubes shape is {dcubes.shape}; d2 shape is {d2.shape}")
+        assert( np.isclose( np.average((d2/data)[30:60,30:60,30:60],axis=(0,1,2)),
+                           1, atol=1e-9))
         
-
-
-
-
-
-
-
-
-
-    
-    
-    
