@@ -340,9 +340,9 @@ def hannify(source, order=2, axis=None, copy=False):
     sin function is scaled so that the center of the window is unity and the 
     wavelength is the same as the width of the window.
     
-    This is used because Hanning windows and variants thereof have nice 
+    This is used because Hann windows and variants thereof have nice 
     summing properties, so if you choose the right offset between adjacent 
-    Hanning windows you don't have to do a scaled sum.  This kills two 
+    Hann windows you don't have to do a scaled sum.  This kills two 
     birds with one stone, for the noisegate algorithm:  it provides good 
     apodization and also makes recombining the data better.
 
@@ -612,6 +612,11 @@ def noise_gate_batch(
     to merge apodization and recombination.  The neighborhoods are subsampled by
     a factor of 3, and offset-summed to reconstitute the original data.  this
     means that a margin near each boundary of the data set remains apodized.
+    The sin^4 comes from *double* apodization: each cube is apodized with a
+    normal sin^2 window before the initial Fourier transform; and then apodized 
+    again after it is inverse-transformed.  The second apodization minimizes 
+    boundary effects from the (potentially radical) adaptive filtering, and 
+    results in an overall windowing function of sin^4.
     
 
     Parameters
