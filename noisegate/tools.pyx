@@ -19,6 +19,10 @@ ctypedef np.complex128_t CDTYPE_t
 RDTYPE = np.float64
 ctypedef np.float64_t RDTYPE_t
 
+IDTYPE = np.int64
+ctypedef np.int64_t IDTYPE_t
+
+
 
 
 def shred(
@@ -738,10 +742,14 @@ def noise_gate_batch(
     # Cut up the data -- have to do this first, in case we call get_noise_spectrum.
     cubies = shred(source, cubesize, cubesize/3)
     hannify(cubies)
+    
+    # Make the 
 
     # Call get_noise_spectrum if necessary
     if(spectrum is None):
-        spectrum = get_noise_spectrum(cubies, pct=pct, dkpct=dkpct, 
+#        spectrum = get_noise_spectrum(cubies, pct=pct, dkpct=dkpct, 
+#                                      subsamp=subsamp, model=model)
+        spectrum = get_noise_spectrum_faster(source, pct=pct, dkpct=dkpct, 
                                       subsamp=subsamp, model=model)
         
     # Now drop into the optimized central loop to do the gating.  These are
@@ -1037,3 +1045,448 @@ cdef noise_gate_mult(np.ndarray cubies,
                 # the original cubies array.
                 cubies[ch_z,ch_y,ch_x] = np.fft.ifftn(tmp_spec,axes=(0,1,2)).astype(float)
 
+
+
+######################################
+
+# Make a Hann window of a given size.  Not heavily optimized 
+cpdef hann_window(size):
+    '''
+    hann_window - make a 3D Hann window, and return it
+    
+    Not heavily optimized since it gets called only occasionally.
+
+    Parameters
+    ----------
+    size : 3-element array-like
+        The size of the window to create
+
+    Returns
+    -------
+    a NumPy array containing the window
+
+    '''
+    out = np.zeros(size).T + 1
+    dex = np.mgrid[0:size[0],0:size[1],0:size[2]].T
+    
+    out *= np.sin( (dex[...,0] + 0.5) * np.pi / size[0] )
+    out *= np.sin( (dex[...,1] + 0.5) * np.pi / size[1] ) 
+    out *= np.sin( (dex[...,2] + 0.5) * np.pi / size[2] ) 
+    out *= out
+    
+    
+    return out
+
+    
+
+
+cpdef get_noise_spectrum_faster(np.ndarray[RDTYPE_t,ndim=3] source,
+                              float pct=50,
+                              float dkpct=5,
+                              str model='shot',
+                              cubesize=18,
+                              cubediv=6,
+                              subsamp=4,
+                              ):
+    '''
+    get_noise_spectrum_faster -- extract a noise spectrum from a 3D data set,
+    without explicit cubification.  Returns a dictionary containing the 
+    spectrum itself.
+    
+    The noise spectrum calculation follows the analysis in the DeForest 2017
+    paper.
+
+    Parameters
+    ----------
+    source : numpy array (3D)
+        Data set to use.  Any vignetting function must have been removed already.
+    float pct : float, optional
+        The percentile value of Fourier magnitudes to keep for the noise spectrum. 
+        The default is 50.
+    float dkpct : float, optional
+        The percentile value of Fourier magnitudes to keep for the dark portion
+        of a hybrid noise spectrum (if relevant). The default is 5.
+    str model : TYPE, optional
+        The noise model to use -- must be "constant", shot", "hybrid", or .
+        "multiplicative".  The default is "shot".
+    int cubesize : int, optional
+        The size of a neighborhood to treat.  This can be either a scalar or a 
+        3-vector. It must be an integer multiple of cubediv.  The default is 18.
+    int cubediv : int, optional
+        This is the fraction of the cubesize to step between adjacent neighborhoods.
+        It must divide evenly into cubesize. The default is 6.
+    int subsamp : int, optional
+        This is the fraction along each axis by which the available neighborhoods
+        are to be subsampled. The default is 2, which samples 1/8 of the available
+        neighborhoods.
+     : TYPE
+        DESCRIPTION.
+
+    Returns
+    -------
+    None.
+
+    '''
+    # Converting model to a cdeffed "imodel" lets us use interger comparisons
+    # in the hotspot loop below
+    cdef int imodel
+    if(model[0]=='c'):
+        imodel = 1
+    elif(model[0]=='s'):
+        imodel = 2
+    elif(model[0]=='h'):
+        imodel = 3
+    elif(model[0]=='m'):
+        imodel = 4
+    else:
+        raise ValueError('get_noise_spectrum_faster: model must be const, shot, hybrid, or multiplicative')
+
+    # Make sure that the cubesize and subsamp are cdeffed ndarrays with integer type
+    cdef np.ndarray[IDTYPE_t,ndim=1] cd_cubesize = np.zeros((3),dtype=IDTYPE) + np.array(cubesize,dtype=IDTYPE)
+    cdef np.ndarray[IDTYPE_t,ndim=1] cd_cubediv  = np.zeros((3),dtype=IDTYPE) + np.array(cubediv, dtype=IDTYPE)
+    cdef np.ndarray[IDTYPE_t,ndim=1] cd_subsamp  = np.zeros((3),dtype=IDTYPE) + np.array(subsamp, dtype=IDTYPE)
+       
+    if( np.any( cd_cubesize % cd_cubediv != 0 ) ):
+        raise ValueError('get_noise_spectrum_faster: cubesize and subsamp must be compatible.')
+
+    if( np.any( (cd_cubediv != 3) * (cd_cubediv != 6) ) ):
+        raise ValueError(f"get_noise_spectrum_faster: only cubedivs of 3 and 6 are supported. ({cd_cubediv})")
+        
+    if( np.any( cd_cubesize % cd_subsamp != 0 ) ):
+        raise ValueError('get_noise_spectrum_faster: subsamp must evenly divide cubesize.')
+        
+    # Pull cube size out into individual ints for later use    
+    cdef int cd_cube_zsize = cd_cubesize[0]
+    cdef int cd_cube_ysize = cd_cubesize[1]
+    cdef int cd_cube_xsize = cd_cubesize[2]
+    
+    # cdef loop ends
+    cdef int source_zstop = source.shape[0] - cd_cube_zsize
+    cdef int source_ystop = source.shape[1] - cd_cube_ysize
+    cdef int source_xstop = source.shape[2] - cd_cube_xsize
+    
+    # Define a windowing function array
+    cdef np.ndarray[RDTYPE_t,ndim=3] cd_hann = hann_window(cd_cubesize)
+    
+    # Define windows to hold the cubie before and after.
+    # the cubie gets pre-allocated.  The mcubie is calculated on the fly 
+    # by np.abs.
+    cdef np.ndarray[RDTYPE_t,ndim=3] cubie  = np.empty(cd_cubesize,dtype=RDTYPE)
+    cdef np.ndarray[RDTYPE_t,ndim=3] mcubie 
+  
+    # Define strides through the source array for each cube.  This is how 
+    # far we step for each comparison spectrum.
+    cdef int source_zstride = cd_cube_zsize * cd_subsamp[0] / cd_cubediv[0]
+    cdef int source_ystride = cd_cube_ysize * cd_subsamp[1] / cd_cubediv[1]
+    cdef int source_xstride = cd_cube_xsize * cd_subsamp[2] / cd_cubediv[2]
+    
+    # Calculate how many spectra we are examining
+    cdef int n_spectra = (
+            int( source_zstop / source_zstride + 1 ) *
+            int( source_ystop / source_ystride + 1) *
+            int( source_xstop / source_xstride + 1)
+            )
+
+    # Define spectral arrays to hold the ensemble.  Allocate only those that
+    # are needed.  Three types of arrays, so three variables.
+    cdef np.ndarray[RDTYPE_t,ndim=4] dark_spectra
+    cdef np.ndarray[RDTYPE_t,ndim=4] shot_spectra
+    cdef np.ndarray[RDTYPE_t,ndim=4] mult_spectra
+
+    if( imodel == 1 or imodel==3):
+        dark_spectra = np.empty( ( cd_cube_zsize, cd_cube_ysize, cd_cube_xsize, n_spectra ) )
+    if( imodel == 2 or imodel==3):
+        shot_spectra = np.empty( ( cd_cube_zsize, cd_cube_ysize, cd_cube_xsize, n_spectra ) )
+    if( imodel == 4):
+        mult_spectra = np.empty( ( cd_cube_zsize, cd_cube_ysize, cd_cube_xsize, n_spectra ) )
+    
+    # Define some loop variables.  cdex points to which spectrum we are storing in the array.
+    cdef int ix,iy,iz,icx,icy,icz
+    cdef int cdex = 0
+    cdef float acc
+    
+    print(f"Accumulating {n_spectra} spectra...")
+    # Main accumulation loop
+    # Outer 3: across cubies
+    for icz in range(0, source_zstop, source_zstride):
+        for icy in range(0, source_ystop, source_ystride):
+            for icx in range(0, source_xstop, source_xstride):
+                
+                # Copy a cubie into the holding tank
+                for iz in range(0,cd_cube_zsize):
+                    for iy in range(0,cd_cube_ysize):
+                        for ix in range(0,cd_cube_xsize):
+                            # I hate having so much pointer arithmetic here -- 
+                            # dropping into C would go faster,
+                            # with direct pointer increments.
+                            cubie[iz,iy,ix] = cd_hann[iz,iy,ix] * source[ icz+iz, icy+iy, icx+ix]
+
+                # Now Fourier transform.  Replace this with an FFTW call one day.
+                mcubie = np.abs(np.fft.fftn( cubie ))
+
+                # Accumulate spectra as needed
+                
+                # Dark spectrum for constant or hybrid model
+                if( imodel==1 or imodel==3 ):
+                    for iz in range(0,cd_cube_zsize):
+                        for iy in range(0,cd_cube_ysize):
+                            for ix in range(0,cd_cube_xsize):
+                                dark_spectra[iz,iy,ix,cdex] = mcubie[iz,iy,ix]
+                                
+                # Shot spectrum for shot or hybrid model
+                if( imodel==2 or imodel==3):
+                    # Accumulate sum-of-sqrts
+                    acc = 0
+                    for iz in range(0,cd_cube_zsize):
+                        for iy in range(0,cd_cube_ysize):
+                            for ix in range(0,cd_cube_xsize):
+                                acc += sqrt(cubie[iz,iy,ix])
+                    for iz in range(0,cd_cube_zsize):
+                        for iy in range(0,cd_cube_ysize):
+                            for ix in range(0,cd_cube_xsize):
+                                shot_spectra[iz,iy,ix,cdex] = mcubie[iz,iy,ix]/acc
+                                
+                # Proportional spectrum for mult model
+                if( imodel==4):
+                    # Accumulate sum
+                    acc = 0
+                    for iz in range(0,cd_cube_zsize):
+                        for iy in range(0,cd_cube_ysize):
+                            for ix in range(0,cd_cube_xsize):
+                                acc += cubie[iz,iy,ix]
+                    for iz in range(0,cd_cube_zsize):
+                        for iy in range(0,cd_cube_ysize):
+                            for ix in range(0,cd_cube_xsize):
+                                mult_spectra[iz,iy,ix,cdex] = mcubie[iz,iy,ix]/acc
+                
+                # Move to the next spectrum
+                cdex+=1
+                
+    print(f"cdex={cdex}; n_spectra={n_spectra}")
+    print(f"Sorting...")
+                
+    # Now we've accumulated a collection of spectra.  
+    # Define the output dictionary (we're out of the hotspot) and then
+    # do the sorting in numpy.
+    
+    out = {'model':model}
+    
+    if( imodel==1 or imodel==3):
+        dark_spectra.sort(axis=-1)
+        if(imodel==1):
+            dex = int( pct / 100 * cdex )
+        else:
+            dex = int( dkpct / 100 * cdex )
+        out['const_spectrum'] = dark_spectra[:,:,:,dex]+0
+        
+    if( imodel==2 or imodel==3):
+        shot_spectra.sort(axis=-1)
+        dex = int( pct/100 * cdex )
+        out['shot_spectrum'] = shot_spectra[:,:,:,dex]+0
+    
+    if( imodel==4):
+        mult_spectra.sort(axis=-1)
+        dex = int( pct/100 * cdex )
+        out['mult_spectrum'] = mult_spectra[:,:,:,dex]+0
+        
+    print("get_noise_spectrum_faster: done.")
+    
+    return out
+
+
+cpdef noise_gate_batch_faster(
+        np.ndarray[RDTYPE_t,ndim=3] source,
+        float pct=50,
+        float dkpct=5,
+        float factor=1.8,
+        float dkfactor=1.8,
+        str method='gate',
+        str model='hybrid',
+        cubesize=18,
+        cubediv=3,
+        subsamp=4,
+        vignette=None,
+        spectrum=None,
+        ):
+    '''
+    noise_gate_batch_faster - carry out noise gatng on an image sequence contained
+    in a 3D numpy array.  Returns the modified array.
+    
+    The noise gating follows the analysis in the DeForest 2017 paper.
+    
+    This version tries to lean in to the Cython approach and eschews 
+    cubification completely.
+    
+    the data are cubified nto neighborhoods and subjected to Hann windowing,
+    then (if necessary) sent to the noise spectrum estimator 
+    (get_noise_spectrum).  Then the cubified data are compared to the noise 
+    spectrum and filtered with a locally constructed adaptive filter that keeps 
+    the significant terms in the local neighborhood Fourier transform around 
+    each point.  Finally the cubies are reassembled to match the original data.
+    
+    Specific algorithmic adjustments are described in the parameters section 
+    below
+    
+    The cubification strategy uses the identity that 
+        sum(x=0,2π/3,4π/3) sin^4 (x + z) = 1.125
+    to merge apodization and recombination.  The neighborhoods are subsampled by
+    a factor of 3, and offset-summed to reconstitute the original data.  this
+    means that a margin near each boundary of the data set remains apodized.
+    The sin^4 comes from *double* apodization: each cube is apodized with a
+    normal sin^2 window before the initial Fourier transform; and then apodized 
+    again after it is inverse-transformed.  The second apodization minimizes 
+    boundary effects from the (potentially radical) adaptive filtering, and 
+    results in an overall windowing function of sin^4.
+    
+
+    Parameters
+    ----------
+    source : Numpy array with 3 dimensions
+        This is a Numpy array containing the source data.  Only 3 dimensions
+        are supported at the moment:  t, y, x.
+    pct : float, optional
+        The neighborhoods (cubies) in the data are treated as an ensemble, and
+        scaled Fourier components are used to estimate noise level.  This is the
+        percentile value (across neighborhoods) of each Fourier component, that
+        is considered to be a noise level threshold.  The default value of 50
+        assumes that most Fourier components are noise dominated in most
+        locations of the image.  Lower values should be used for processing less 
+        noisy image sets.
+    dkpct : float, optional
+        This works as pct, but for estimating dark noise.  The default value 
+        of 5 assumes that the fifth-percentile value (across neighborhoods) of 
+        any given Fourier component can be treated as the dark noise level.
+        Dark noise is relevant for the "hybrid" noise model only.
+    factor : float, optional
+        This is the factor by which a Fourier component magnitude must exceed 
+        its corresponding noise-model value, to be retained in the output 
+        data.  The default value of 2 keeps approximately 3% of the background
+        noise spuriously (2 sigma); this seems to be a good compromise between
+        retaining noise and rejecting weak image features, for many applications.
+    float dkfactor : TYPE, optional
+        This is similar to the 'factor' parameter, but applies to dark noise
+        in the hybrid noise model.
+    method : string, optional
+        This describes the filtering method used to handle neighborhood Fourier
+        components that do not rise significantly above the noise model.  
+        Accepted values are:
+            gate: causes simple gating:  Fourier components that do not 
+               significantly exceed the noise floor are explicitly set to 0
+            wiener: causes a Wiener filter to be applied, with rollover at the
+               significance threshold ('factor' parameter times the noise model).
+        The default is 'gate'.
+    model : string, optional
+        This describes the noise model to be used for the source data. The noise
+        model describes how noise is expected to vary as a function of image
+        characteristics.  Accepted values are:
+            constant: the dominant noise source is considered to be independent
+               of image value.  This is suitable for data, such as solar 
+               magnetograms or dark-noise-limited images in general, that are
+               dominated by an additive noise source independent of image value.
+            shot: the dominant noise source is considered to scale like the 
+               square root of image value, like Poisson "shot" noise from 
+               photon counting
+            hybrid: two noise sources are considered:  shot noise, and also a
+               dark noise "floor" in dark portions of the image.  This is the
+               most commonly applicable model for direct scientific images 
+               that are shot noise limited with an APS or CCD detector.
+            multiplicative: the dominant noise term is considered to be a 
+               constant multiplicative noise source or, equivalently, an 
+               additive noise source whose RMS value scales with image value.
+        The default is "hybrid".
+    cubesize : int, optional
+        This is the number of pixels in a neighborhood ('cubie') to be considered
+        for a local adaptive filter.  The number must be divisible by 3.  You 
+        can specify either a single integer, in which case the neighborhoods are
+        cubical, or an array of three values in (t, y, x) order, in which case
+        the neighborhoods can have separate size along each axis. For maximum
+        noise reduction the neighborhood should be comparable to the maximum
+        coherence length in the data.  For data that include rapidly moving
+        features which do not, themselves, evolve rapidly, you should consider
+        matching the t size to the x and y sizes, based on the expected speed
+        of the features.
+    cubediv int, optional
+        This is the fraction of a neighborhood size to step between neighborhoods
+        when processing.  3 gives 2/3 overlap between neighborhoods in all 
+        axes, 6 gives 5/6 overlap.
+    subsamp : int, optional
+        This allows the noise-spectrum estimator to subsample the cubies data 
+        by the specified factor along each axis, saving computing time. The 
+        default is 2, which reduces the number of Fourier transforms for this 
+        step by a factor of 8.  
+    spectrum : dictionary, optional
+        If present, this should be a dictionary returned by get_noise_spectrum.
+        If not present, a new noise spectrum is calculated for this batch.  
+        Since the noise spectrum model is constant for each instrument 
+        configuration, there is no nead to recalculate the spectrum for 
+        different batches processed as part of a larger data set; this
+        parameter lets you explicitly calculate a spectrum first, then call
+        noise_gate_batch multiple times to process a data set too large to 
+        fit in memory simultaneously.
+    vignette : numpy 2-D array or none
+        If supplied, this is a vignetting function of the instrument. The data
+        are assumed to be already corrected for vignetting, so they are scaled 
+        by the vignetting function before processing, then it is removed after
+        processing.  This produces better uniformity of noise characeristics in,
+        e.g., coronagraphs that use vignetting to reduce detector dynamic range.
+
+        
+    Returns
+    -------
+    A numpy array matching the source array, containing the cleaned-up data.
+
+    '''
+    
+    # Converting model to a cdeffed "imodel" lets us use integer comparisons later
+    cdef int imodel
+    if(model[0] =='c'):
+        imodel=1
+    elif(model[0]=='s'):
+        imodel=2
+    elif(model[0]=='h'):
+        imodel=3
+    elif(model[0]=='m'):
+        imodel=4
+    else:
+        raise ValueError("noise_gate_batch: Mode must be constant, hybrid, shot, or multiplicative")
+        
+          
+    cdef int imethod
+    if(method[0]=='g'):
+        imethod = 1
+    elif(method[0]=='w'):
+        imethod = 2
+    else: 
+        raise ValueError("noise_gate_batch: method must be gate or wiener")
+  
+    
+    # Make sure that the cubesize and subsamp are cdeffed ndarrays with integer type
+    cdef np.ndarray[IDTYPE_t,ndim=1] cd_cubesize = np.zeros((3),dtype=IDTYPE) + np.array(cubesize,dtype=IDTYPE)
+    cdef np.ndarray[IDTYPE_t,ndim=1] cd_cubediv  = np.zeros((3),dtype=IDTYPE) + np.array(cubediv, dtype=IDTYPE)
+    cdef np.ndarray[IDTYPE_t,ndim=1] cd_subsamp  = np.zeros((3),dtype=IDTYPE) + np.array(subsamp, dtype=IDTYPE)
+       
+    if( np.any( cd_cubesize % cd_cubediv != 0 ) ):
+        raise ValueError('get_noise_spectrum_faster: cubesize and subsamp must be compatible.')
+
+    if( np.any( (cd_cubediv != 3) * (cd_cubediv != 6) ) ):
+        raise ValueError(f"get_noise_spectrum_faster: only cubedivs of 3 and 6 are supported. ({cd_cubediv})")
+        
+    if( np.any( cd_cubesize % cd_subsamp != 0 ) ):
+        raise ValueError('get_noise_spectrum_faster: subsamp must evenly divide cubesize.')
+        
+    # Pull cube size out into individual ints for later use    
+    cdef int cd_cube_zsize = cd_cubesize[0]
+    cdef int cd_cube_ysize = cd_cubesize[1]
+    cdef int cd_cube_xsize = cd_cubesize[2]
+ 
+    
+    if( spectrum is None):
+       spectrum = get_noise_spectrum_faster(source, 
+                                            pct=pct,
+                                            dkpct=dkpct,
+                                            model=model,
+                                            cubesize=cubesize,
+                                            cubediv=cubediv,
+                                            subsamp=subsamp
+                                            )
+       
