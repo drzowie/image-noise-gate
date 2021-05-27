@@ -82,18 +82,15 @@ History
 This package was ported and adapted from a collection of Perl/PDL routines
 "noise_gate") first written in 2017.  
 
-
 Commercial use of the method is subject to U.S. Patent No. 10181181.
 
 Notes
 =====
 
-This version of the method makes more passes through memory than the Perl/PDL 
-implementation, and therefore operates about 4x slower than the PDL code.
-Dropping into C and operating directly in the original data set, rather
-than cutting into cubies and reassembling directly, should yield ~3x 
-improvement in speed; using FFTW directly on the individual spectra should
-bring it up to parity with the Perl implementation.
+This version of the method makes use of NumPy operations (such as fft)
+in the per-neighborhood hot spot, so it is ~2x slower than the PDL code. 
+Dropping into C and using fftw and other per-pixel primitive operations
+might bring it up to parity with PDL.
 
 Author
 ======
