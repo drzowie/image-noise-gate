@@ -443,609 +443,12 @@ def hannify(source, order=2, axis=None, copy=False):
                         # None identified
                         raise ValueError("hannify: something went wrong with the axis transposition step")
         ss = np.transpose( source, axes = axis_xpose_order )
-        print(f"hannify: xpose order is {axis_xpose_order}")
     
     # Do the transpose to put all the active axes at the end, then 
     # broadcast-multiply the filter.
     ss *= filt
                
     return source
-
-
-# get_noise_spectrum is a hotspot so it should be fully cdeffed.  It isn't, since
-# the sorting means that vectorization cache-breakage doesn't cost all that much.
-
-def get_noise_spectrum( source, 
-                    float pct=50, 
-                    float dkpct=5, 
-                    int   subsamp=2, 
-                    str   model='shot'):
-    '''
-    get_noise_spectrum - extract a noise spectrum from an already-cubified
-    3D data set.  Returns a dictionary containing the spectrum itself.  
-    
-    The noise spectrum calculation follows the analysis in the DeForest 2017
-    paper.
-    
-    You should already have cubified and hannified the data for this call.
-    
-    find_spectrum is specifically for 3D work and therefore requires a 6D 
-    (cubified) input.
-
-    Parameters
-    ----------
-    source : numpy array (6D)
-        Cubified, hannified data set to use.  First 3 axes run across cubies,
-        last 3 axes are within each cubie.
-    pct : floating-point, optional
-        This is the percentile value of each Fourier component magnitude 
-        (considered as an ensemble across cubes and modified, if relevant,
-        with the shot noise estimator) to treat as the noise floor. The 
-        default is 50, which uses the median and is suitable for images that
-        are noise dominated in most Fourier components.
-    dkpct : For the hybrid mode, this specifies the percentile of each Fourier
-        component magnitude that is used for the constant term in the hybrid
-        model.  The default is 5, which gets the darkest portion of the image
-        sequence and is suitable for data sets in which a noticeable amount
-        of the data are dominated by dark noise effects.
-    model : string, optional
-        This is the noise model to use when finding the spectrum.  The default
-        is 'shot'.  Valid values are 'constant', 'multiplicative', 'shot', and
-        'hybrid [shot and constant]'.  Only the first character is used. 
-        The default is 'shot'.
-    subsamp : integer, optional
-        This is the stride to take through each cube axis.  Most data sets
-        have a large enough number of subcubes that subsampling can greatly
-        increase speed at no real cost in precision.  The default value of 2
-        speeds up spectrum extraction by a factor of 8
-
-    Returns
-    -------
-    A dictionary containing the spectrum, the dark spectrum if relevant, and
-    metadata about the cube size and mode.  The dictionary is suitable for
-    passing in to ng_batch or ng_sequence.
-
-    '''
-    if(not isinstance(source,np.ndarray)):
-        raise ValueError("get_noise_spectrum: source data must be a NumPy array")
-    if(len(source.shape) != 6):
-        raise ValueError("get_noise_spectrum: source data must have 6 dimensions")
-    if(dkpct >= 100 or dkpct < 0):
-        raise ValueError("get_noise_spectrum: dkpct is out of range [0,100)")
-    if(pct >= 100 or dkpct < 0):
-        raise ValueError("get_noise_spectrum: pct is out of rante [0,100)")
-        
-    # Output is a dictionary.  Populate as needed.
-    out = {'model':model}
-
-
-    # Subsample the cubies array and Fourier transform the subset.  We don't
-    # care about the phase so we just grab magnitude ('abs').
-    # The "cubies" array is ( N, z, y, x ), where N is the number of cubies
-    # we're going to look at, and the other are dimensions of each cubie.
-    cubies = source[0::subsamp,0::subsamp,0::subsamp,...]. \
-        reshape([-1, source.shape[3], source.shape[4], source.shape[5]])
-
-    # Fourier transform is *after* the sum-of-square-roots in case we ever 
-    # decide to do it in-place.  This is really wasteful since the fft3
-    # converts everything to complex and also copies all the data.
-    fcubies = np.abs(np.fft.fftn(cubies,axes=(-3,-2,-1)))
-    
-    # use m as a shorthand
-    m = model
-
-    if( m[0] not in {'c','h','s','m','n'}):
-        raise ValueError("get_noise_spectrum: Mode must be constant, hybrid, shot, or multiplicative")
-
-    # Both constant and hybrid mode use a constant spectrum with no scaling.
-    # Accumulate that now, so we can scale (aka screw up) the fcubies spectra
-    # for the shot noise calculation later.
-    if(m[0] == 'c' or m[0] == 'h'):
-        if(m[0]=='h'):
-            frac = dkpct/100
-            out['const_pct'] = dkpct
-        else:
-            frac = pct/100
-            out['const_pct'] = pct
-        dex = np.floor(frac * fcubies.shape[0]).astype(int)
-         
-        fcubies.sort(axis=0)
-        out['const_spectrum'] = fcubies[dex,:,:,:]
-        
-    # Both shot and hybrid mode use sum-sqrt scaled spectra.
-    if(m[0] == 's' or m[0] == 'h'):
-        # Take the square root of each pixel and then sum over each cubie. 
-        # The cubies get clipped at 1e-20 since shot noise treats each value
-        # as positive-definite.
-        cubies_sumsqrt = np.sum(np.sqrt(cubies.clip(1e-20)),axis=(-1,-2,-3))
-
-        # reshape back to be broadcastable with fcubies, then scale the fcubies
-        fcubies /= cubies_sumsqrt.reshape([-1,1,1,1])
-        fcubies.sort(axis=0)
-        dex = np.floor( pct / 100 * fcubies.shape[0] ).astype(int)
-        
-        out['shot_spectrum'] = fcubies[dex,:,:,:]
-    
-    # multiplicative mode just scales by the average value..
-    if(m[0]=='m'):
-        # Since the Fourier transform found the average value already, 
-        # we just divide by that instead of calculating it again.
-        # divide by that. 
-        fcubies /= fcubies[:,0,0,0].reshape([-1,1,1,1])
-        fcubies.sort(axis=0)
-        
-        dex = np.floor( pct/100 * fcubies.shape[0] )
-        
-        out['mult_spectrum'] = fcubies[dex,:,:,:]
- 
-    return out
-
-
-
-def noise_gate_batch(
-        source,
-        float pct=50,
-        float dkpct=5,
-        float factor=2.0,
-        float dkfactor=2.0,
-        str method='gate',
-        str model='hybrid',
-        int cubesize=18,
-        int subsamp=2,
-        vignette=None,
-        spectrum=None,
-        ):
-    '''
-    noise_gate_batch - carry out noise gatng on an image sequence contained
-    in a 3D numpy array.  Returns the modified array.
-    
-    The noise gating follows the analysis in the DeForest 2017 paper.
-    
-    the data are cubified nto neighborhoods and subjected to Hann windowing,
-    then (if necessary) sent to the noise spectrum estimator 
-    (get_noise_spectrum).  Then the cubified data are compared to the noise 
-    spectrum and filtered with a locally constructed adaptive filter that keeps 
-    the significant terms in the local neighborhood Fourier transform around 
-    each point.  Finally the cubies are reassembled to match the original data.
-    
-    Specific algorithmic adjustments are described in the parameters section 
-    below
-    
-    The cubification strategy uses the identity that 
-        sum(x=0,2π/3,4π/3) sin^4 (x + z) = 1.125
-    to merge apodization and recombination.  The neighborhoods are subsampled by
-    a factor of 3, and offset-summed to reconstitute the original data.  this
-    means that a margin near each boundary of the data set remains apodized.
-    The sin^4 comes from *double* apodization: each cube is apodized with a
-    normal sin^2 window before the initial Fourier transform; and then apodized 
-    again after it is inverse-transformed.  The second apodization minimizes 
-    boundary effects from the (potentially radical) adaptive filtering, and 
-    results in an overall windowing function of sin^4.
-    
-
-    Parameters
-    ----------
-    source : Numpy array with 3 dimensions
-        This is a Numpy array containing the source data.  Only 3 dimensions
-        are supported at the moment:  t, y, x.
-    pct : float, optional
-        The neighborhoods (cubies) in the data are treated as an ensemble, and
-        scaled Fourier components are used to estimate noise level.  This is the
-        percentile value (across neighborhoods) of each Fourier component, that
-        is considered to be a noise level threshold.  The default value of 50
-        assumes that most Fourier components are noise dominated in most
-        locations of the image.  Lower values should be used for processing less 
-        noisy image sets.
-    dkpct : float, optional
-        This works as pct, but for estimating dark noise.  The default value 
-        of 5 assumes that the fifth-percentile value (across neighborhoods) of 
-        any given Fourier component can be treated as the dark noise level.
-        Dark noise is relevant for the "hybrid" noise model only.
-    factor : float, optional
-        This is the factor by which a Fourier component magnitude must exceed 
-        its corresponding noise-model value, to be retained in the output 
-        data.  The default value of 2 keeps approximately 3% of the background
-        noise spuriously (2 sigma); this seems to be a good compromise between
-        retaining noise and rejecting weak image features, for many applications.
-    float dkfactor : TYPE, optional
-        This is similar to the 'factor' parameter, but applies to dark noise
-        in the hybrid noise model.
-    method : string, optional
-        This describes the filtering method used to handle neighborhood Fourier
-        components that do not rise significantly above the noise model.  
-        Accepted values are:
-            gate: causes simple gating:  Fourier components that do not 
-               significantly exceed the noise floor are explicitly set to 0
-            wiener: causes a Wiener filter to be applied, with rollover at the
-               significance threshold ('factor' parameter times the noise model).
-        The default is 'gate'.
-    model : string, optional
-        This describes the noise model to be used for the source data. The noise
-        model describes how noise is expected to vary as a function of image
-        characteristics.  Accepted values are:
-            constant: the dominant noise source is considered to be independent
-               of image value.  This is suitable for data, such as solar 
-               magnetograms or dark-noise-limited images in general, that are
-               dominated by an additive noise source independent of image value.
-            shot: the dominant noise source is considered to scale like the 
-               square root of image value, like Poisson "shot" noise from 
-               photon counting
-            hybrid: two noise sources are considered:  shot noise, and also a
-               dark noise "floor" in dark portions of the image.  This is the
-               most commonly applicable model for direct scientific images 
-               that are shot noise limited with an APS or CCD detector.
-            multiplicative: the dominant noise term is considered to be a 
-               constant multiplicative noise source or, equivalently, an 
-               additive noise source whose RMS value scales with image value.
-        The default is "hybrid".
-    cubesize : int, optional
-        This is the number of pixels in a neighborhood ('cubie') to be considered
-        for a local adaptive filter.  The number must be divisible by 3.  You 
-        can specify either a single integer, in which case the neighborhoods are
-        cubical, or an array of three values in (t, y, x) order, in which case
-        the neighborhoods can have separate size along each axis. For maximum
-        noise reduction the neighborhood should be comparable to the maximum
-        coherence length in the data.  For data that include rapidly moving
-        features which do not, themselves, evolve rapidly, you should consider
-        matching the t size to the x and y sizes, based on the expected speed
-        of the features.
-    subsamp : int, optional
-        This allows the noise-spectrum estimator to subsample the cubies data 
-        by the specified factor along each axis, saving computing time. The 
-        default is 2, which reduces the number of Fourier transforms for this 
-        step by a factor of 8.  
-    spectrum : dictionary, optional
-        If present, this should be a dictionary returned by get_noise_spectrum.
-        If not present, a new noise spectrum is calculated for this batch.  
-        Since the noise spectrum model is constant for each instrument 
-        configuration, there is no nead to recalculate the spectrum for 
-        different batches processed as part of a larger data set; this
-        parameter lets you explicitly calculate a spectrum first, then call
-        noise_gate_batch multiple times to process a data set too large to 
-        fit in memory simultaneously.
-    vignette : numpy 2-D array or none
-        If supplied, this is a vignetting function of the instrument. The data
-        are assumed to be already corrected for vignetting, so they are scaled 
-        by the vignetting function before processing, then it is removed after
-        processing.  This produces better uniformity of noise characeristics in,
-        e.g., coronagraphs that use vignetting to reduce detector dynamic range.
-
-        
-    Returns
-    -------
-    A numpy array matching the source array, containing the cleaned-up data.
-
-    '''
- 
-    # use m as a shorthand for the model
-    m = model
-    
-    if( m[0] not in {"c","h","s","m","n"}):
-       raise ValueError("noise_gate_batch: Mode must be constant, hybrid, shot, or multiplicative")
-  
-    cdef int m2
-    if(method[0]=='g'):
-        m2 = 0
-    elif(method[0]=='w'):
-        m2 = 1
-    else:
-        raise ValueError("noise_gate_batch: method must be gate or wiener")
-        
-        
-    if( (spectrum is not None) and (spectrum['model'] != m)):
-        raise ValueError("noise_gate_batch: spectrum mode must match gating mode")
-    
-    # Check for  vignetting function if present, and decorrect
-    if( vignette is not None ):
-        source *= vignette
-    
-    # Cut up the data -- have to do this first, in case we call get_noise_spectrum.
-    cubies = shred(source, cubesize, cubesize/3)
-    hannify(cubies)
-    
-    # Make the 
-
-    # Call get_noise_spectrum if necessary
-    if(spectrum is None):
-#        spectrum = get_noise_spectrum(cubies, pct=pct, dkpct=dkpct, 
-#                                      subsamp=subsamp, model=model)
-        spectrum = get_noise_spectrum_faster(source, pct=pct, dkpct=dkpct, 
-                                      subsamp=subsamp, model=model)
-        
-    # Now drop into the optimized central loop to do the gating.  These are
-    # separate routines to provide all-cdef variables that Cython needs for 
-    # best optimization.
-    if(m[0] =='c'):
-        noise_gate_const(cubies, spectrum['const_spectrum'], factor, m2)
-        
-    elif(m[0]=='h'):
-        noise_gate_hybrid(cubies, spectrum['const_spectrum'],spectrum['shot_spectrum'], 
-                          factor, dkfactor, m2)
-    elif(m[0]=='s'):
-        noise_gate_shot(cubies, spectrum['shot_spectrum'], factor, m2)
-        
-    elif(m[0]=='m'):
-        noise_gate_mult(cubies, spectrum['mult_spectrum'], factor, m2)
-        
-    elif(m[0]=='n'):
-        warn("noise_gate_batch: model 'none' selected; ignoring gating step")
-    
-    # Do the second apodization and reconstitute.  The 1.125 comes from the
-    # trig identity sum{i=0,1,2}{sin(x+2*i*PI/3)**4} = 1.125
-    # The cube is because we're working in three axes.
-    hannify(cubies);
-    out = unshred(cubies,cubesize/3) / (1.125**3)
-    
-    if( vignette is not None ):
-        source /= (vignette + (vignette==0))
-    
-    return out
-
-
-#####################
-# These noise_gate_<method> routines are broken out so that Cython can fully
-# compile them.  But they're not as fully optimized as they could be.  In 
-# particular, the fastest algorithm would dip into C and use pointer increment
-# operations instead of indexing calculations for every array index.
-#
-# Maybe fast enough for now; maybe needs to be refined later.
-#
-# Note the dimensionality spec -- Cythonic optimization that allows direct
-# indexing instead of object access.
-#
-# method is 0 for gating, 1 for wiener
-#
-cdef noise_gate_const(np.ndarray[RDTYPE_t, ndim=6] cubies, 
-                      np.ndarray[RDTYPE_t, ndim=3] const_spec, 
-                      float factor, 
-                      int method):
-    assert cubies.dtype == RDTYPE
-    assert const_spec.dtype == RDTYPE
-    
-    assert(method==0 or method==1)
-    
-    cdef int ch_z, ch_y, ch_x
-    cdef int max_z = cubies.shape[0]  # max_{xyz} indexes cubes
-    cdef int max_y = cubies.shape[1]
-    cdef int max_x = cubies.shape[2]
-    cdef int siz_z = cubies.shape[3]  # siz_{xyz} indexes within each cube
-    cdef int siz_y = cubies.shape[4]
-    cdef int siz_x = cubies.shape[5]
-    cdef int z,y,x
-    cdef float snr, wf
-    
-    
-    # We prepare the spectrum by prescaling with factor ot avoid a mult in the
-    # hotspot.  Also allocate a single complex spectrum and scalar cubie workspace.
-    cdef np.ndarray[RDTYPE_t,ndim=3] c_spec = const_spec * factor
-    cdef np.ndarray[RDTYPE_t,ndim=3] tmp_scale = np.zeros([siz_z,siz_y,siz_x],dtype=RDTYPE)
-    cdef np.ndarray[CDTYPE_t,ndim=3] tmp_spec
-    
-  
-    for ch_z in range(max_z):
-        for ch_y in range(max_y):
-            for ch_x in range(max_x):
-                # fftn call drops into Python.  Not the very hottest of hot
-                # spots (that's inside the zyx loops) but not great either.  
-                # This is where dropping into C and calling fftw3 might
-                # help.
-                tmp_spec = np.fft.fftn(cubies[ch_z,ch_y,ch_x],axes=(0,1,2))
-                tmp_scale = np.abs(tmp_spec)
-                
-                # Explicit full Cythonized loop over interior -- is this 
-                # better than implicit?  Dunno.  Docs say it is.
-                if(method==0):
-                    for z in range(siz_z):
-                        for y in range(siz_y):
-                            for x in range(siz_x):
-                                if(tmp_scale[z,y,x] < c_spec[z,y,x]):
-                                    tmp_spec[z,y,x] = 0
-                elif(method==1):
-                    for z in range(siz_z):
-                        for y in range(siz_y):
-                            for x in range(siz_x):
-                                snr = tmp_scale[z,y,x] / c_spec[z,y,x]
-                                wf = snr/(snr+1)
-                                tmp_spec[z,y,x] = tmp_spec[z,y,x]*wf
-                                
-                # Dropping into Python to de-fft and stuff the value back into
-                # the original cubies array.
-                cubies[ch_z,ch_y,ch_x] = np.fft.ifftn(tmp_spec,axes=(0,1,2)).astype(float)
-    
-cdef noise_gate_hybrid(np.ndarray cubies, 
-                      np.ndarray const_spec, 
-                      np.ndarray shot_spec,
-                      float dkfactor,
-                      float factor, 
-                      char method ):  
-    assert cubies.dtype == RDTYPE
-    assert const_spec.dtype == RDTYPE
-    assert shot_spec.dtype==RDTYPE
-    
-    assert(method==0 or method==1)
-    
-    cdef int ch_z, ch_y, ch_x
-    cdef int max_z = cubies.shape[0]  # max_{xyz} indexes cubes
-    cdef int max_y = cubies.shape[1]
-    cdef int max_x = cubies.shape[2]
-    cdef int siz_z = cubies.shape[3]  # siz_{xyz} indexes within each cube
-    cdef int siz_y = cubies.shape[4]
-    cdef int siz_x = cubies.shape[5]
-    cdef int z,y,x
-    cdef float snr, wf
-    cdef float sumsqrt
-    
-    # We prepare the spectrum by prescaling with factor to avoid a mult in the
-    # hotspot.  Also allocate a single complex spectrum and scalar cubie workspace.
-    cdef np.ndarray[RDTYPE_t,ndim=3] c_spec = const_spec * dkfactor
-    cdef np.ndarray[RDTYPE_t,ndim=3] s_spec = shot_spec * factor
-    cdef np.ndarray[RDTYPE_t,ndim=3] tmp_scale = np.zeros([siz_z,siz_y,siz_x],dtype=RDTYPE)
-    cdef np.ndarray[CDTYPE_t,ndim=3] tmp_spec, tmp_cube
-
-    for ch_z in range(max_z):
-        for ch_y in range(max_y):
-            for ch_x in range(max_x):
-                # fftn call drops into Python.  Not the very hottest of hot
-                # spots (that's inside the zyx loops) but not great either.  
-                # This is where dropping into C and calling fftw3 might
-                # help.
-                tmp_spec = np.fft.fftn(cubies[ch_z,ch_y,ch_x],axes=(0,1,2))
-                tmp_scale = np.abs(tmp_spec)
-                
-                # Get the sum-of-square-roots.  Probably needs to be 
-                # done in C (like the above) for maximum speed.
-                sumsqrt = np.sum(np.sqrt(np.abs(cubies[ch_z,ch_y,ch_x])))
-                
-                # Explicit full Cythonized loop over interior -- is this 
-                # better than implicit?  Dunno.  Docs say it is.
-
-                if(method==0):
-                    for z in range(siz_z):
-                        for y in range(siz_y):
-                            for x in range((z==0 and y==0),siz_x):
-                                if(tmp_scale[z,y,x] < c_spec[z,y,x] or 
-                                   tmp_scale[z,y,x] < sumsqrt * s_spec[z,y,x]
-                                   ):
-                                    tmp_spec[z,y,x] = 0
-
-                elif(method==1):
-                    for z in range(siz_z):
-                        for y in range(siz_y):
-                            for x in range((z==0 and y==0),siz_x):
-                                snr = tmp_scale[z,y,x] / (c_spec[z,y,x]**2 + (s_spec[z,y,x]*sumsqrt)**2)**0.5
-                                wf = snr/(snr+1)
-                                tmp_spec[z,y,x] = tmp_spec[z,y,x]*wf
-                                
-                # Dropping into Python again to de-fft and stuff the value back into
-                # the original cubies array.
-                cubies[ch_z,ch_y,ch_x] = np.fft.ifftn(tmp_spec,axes=(0,1,2)).astype(float)
-
-    
-
-cdef noise_gate_shot(np.ndarray cubies, 
-                      np.ndarray shot_spec, 
-                      float factor, 
-                      char method ):
-    assert cubies.dtype == RDTYPE
-    assert shot_spec.dtype == RDTYPE
-    
-    assert(method==0 or method==1)
-    
-    cdef int ch_z, ch_y, ch_x
-    cdef int max_z = cubies.shape[0]  # max_{xyz} indexes cubes
-    cdef int max_y = cubies.shape[1]
-    cdef int max_x = cubies.shape[2]
-    cdef int siz_z = cubies.shape[3]  # siz_{xyz} indexes within each cube
-    cdef int siz_y = cubies.shape[4]
-    cdef int siz_x = cubies.shape[5]
-    cdef int z,y,x
-    cdef float snr, wf
-    cdef float sumsqrt
-    
-    # We prepare the spectrum by prescaling with factor to avoid a mult in the
-    # hotspot.  Also allocate a single complex spectrum and scalar cubie workspace.
-    cdef np.ndarray[RDTYPE_t,ndim=3] s_spec = shot_spec * factor
-    cdef np.ndarray[RDTYPE_t,ndim=3] tmp_scale = np.zeros([siz_z,siz_y,siz_x],dtype=RDTYPE)
-    cdef np.ndarray[CDTYPE_t,ndim=3] tmp_spec, tmp_cube
-
-    for ch_z in range(max_z):
-        for ch_y in range(max_y):
-            for ch_x in range(max_x):
-                # fftn call drops into Python.  Not the very hottest of hot
-                # spots (that's inside the zyx loops) but not great either.  
-                # This is where dropping into C and calling fftw3 might
-                # help.
-                tmp_spec = np.fft.fftn(cubies[ch_z,ch_y,ch_x],axes=(0,1,2))
-                tmp_scale = np.abs(tmp_spec)
-                
-                # Get the sum-of-square-roots.  Probably needs to be 
-                # done in C (like the above) for maximum speed.
-                sumsqrt = np.sum(np.sqrt(np.abs(cubies[ch_z,ch_y,ch_x])))
-                
-                # Explicit full Cythonized loop over interior -- is this 
-                # better than implicit?  Dunno.  Docs say it is.
-
-                if(method==0):
-                    for z in range(siz_z):
-                        for y in range(siz_y):
-                            for x in range((z==0 and y==0),siz_x):
-                                if(tmp_scale[z,y,x] < sumsqrt * s_spec[z,y,x]
-                                   ):
-                                    tmp_spec[z,y,x] = 0
-
-                elif(method==1):
-                    for z in range(siz_z):
-                        for y in range(siz_y):
-                            for x in range((z==0 and y==0),siz_x):
-                                snr = tmp_scale[z,y,x] / (s_spec[z,y,x]*sumsqrt)
-                                wf = snr/(snr+1)
-                                tmp_spec[z,y,x] = tmp_spec[z,y,x]*wf
-                                
-                # Dropping into Python again to de-fft and stuff the value back into
-                # the original cubies array.
-                cubies[ch_z,ch_y,ch_x] = np.fft.ifftn(tmp_spec,axes=(0,1,2)).astype(float)
-
-
-cdef noise_gate_mult(np.ndarray cubies, 
-                      np.ndarray mult_spec, 
-                      float factor, 
-                      char method ):     
-    assert cubies.dtype == RDTYPE
-    assert mult_spec.dtype == RDTYPE
-    
-    assert(method==0 or method==1)
-    
-    cdef int ch_z, ch_y, ch_x
-    cdef int max_z = cubies.shape[0]  # max_{xyz} indexes cubes
-    cdef int max_y = cubies.shape[1]
-    cdef int max_x = cubies.shape[2]
-    cdef int siz_z = cubies.shape[3]  # siz_{xyz} indexes within each cube
-    cdef int siz_y = cubies.shape[4]
-    cdef int siz_x = cubies.shape[5]
-    cdef int z,y,x
-    cdef float snr, wf
-    
-    # We prepare the spectrum by prescaling with factor to avoid a mult in the
-    # hotspot.  Also allocate a single complex spectrum and scalar cubie workspace.
-    cdef np.ndarray[RDTYPE_t,ndim=3] m_spec = mult_spec * factor
-    cdef np.ndarray[RDTYPE_t,ndim=3] tmp_scale = np.zeros([siz_z,siz_y,siz_x],dtype=RDTYPE)
-    cdef np.ndarray[CDTYPE_t,ndim=3] tmp_spec, tmp_cube
-
-    for ch_z in range(max_z):
-        for ch_y in range(max_y):
-            for ch_x in range(max_x):
-                # fftn call drops into Python.  Not the very hottest of hot
-                # spots (that's inside the zyx loops) but not great either.  
-                # This is where dropping into C and calling fftw3 might
-                # help.
-                tmp_spec = np.fft.fftn(cubies[ch_z,ch_y,ch_x],axes=(0,1,2))
-                tmp_scale = np.abs(tmp_spec)
-                
-                # Explicit full Cythonized loop over interior -- is this 
-                # better than implicit?  Dunno.  Docs say it is.
-                # The fillip in the x loop prevents scrozzling the origin component.
-
-                if(method==0):
-                    for z in range(siz_z):
-                        for y in range(siz_y):
-                            for x in range((z==0 and y==0),siz_x):
-                                if(tmp_scale[z,y,x] < tmp_scale[0,0,0] * m_spec[z,y,x]
-                                   ):
-                                    tmp_spec[z,y,x] = 0
-
-                elif(method==1):
-                    for z in range(siz_z):
-                        for y in range(siz_y):
-                            for x in range((z==0 and y==0),siz_x):
-                                snr = tmp_scale[z,y,x] / (tmp_scale[0,0,0] * m_spec[z,y,x])
-                                wf = snr/(snr+1)
-                                tmp_spec[z,y,x] = tmp_spec[z,y,x]*wf
-                                
-                # Dropping into Python again to de-fft and stuff the value back into
-                # the original cubies array.
-                cubies[ch_z,ch_y,ch_x] = np.fft.ifftn(tmp_spec,axes=(0,1,2)).astype(float)
-
-
 
 ######################################
 
@@ -1066,12 +469,12 @@ cpdef hann_window(size):
     a NumPy array containing the window
 
     '''
-    out = np.zeros(size).T + 1
-    dex = np.mgrid[0:size[0],0:size[1],0:size[2]].T
-    
-    out *= np.sin( (dex[...,0] + 0.5) * np.pi / size[0] )
-    out *= np.sin( (dex[...,1] + 0.5) * np.pi / size[1] ) 
-    out *= np.sin( (dex[...,2] + 0.5) * np.pi / size[2] ) 
+    out = np.zeros(size) + 1
+    dex = np.mgrid[0:size[0],0:size[1],0:size[2]]
+
+    out *= np.sin( (dex[0,...] + 0.5) * np.pi / size[0] )
+    out *= np.sin( (dex[1,...] + 0.5) * np.pi / size[1] ) 
+    out *= np.sin( (dex[2,...] + 0.5) * np.pi / size[2] ) 
     out *= out
     
     
@@ -1080,16 +483,17 @@ cpdef hann_window(size):
     
 
 
-cpdef get_noise_spectrum_faster(np.ndarray[RDTYPE_t,ndim=3] source,
+cpdef get_noise_spectrum(np.ndarray[RDTYPE_t,ndim=3] source,
                               float pct=50,
                               float dkpct=5,
                               str model='shot',
                               cubesize=18,
                               cubediv=6,
                               subsamp=4,
+                              verbose=False
                               ):
     '''
-    get_noise_spectrum_faster -- extract a noise spectrum from a 3D data set,
+    get_noise_spectrum -- extract a noise spectrum from a 3D data set,
     without explicit cubification.  Returns a dictionary containing the 
     spectrum itself.
     
@@ -1139,7 +543,7 @@ cpdef get_noise_spectrum_faster(np.ndarray[RDTYPE_t,ndim=3] source,
     elif(model[0]=='m'):
         imodel = 4
     else:
-        raise ValueError('get_noise_spectrum_faster: model must be const, shot, hybrid, or multiplicative')
+        raise ValueError('get_noise_spectrum: model must be const, shot, hybrid, or multiplicative')
 
     # Make sure that the cubesize and subsamp are cdeffed ndarrays with integer type
     cdef np.ndarray[IDTYPE_t,ndim=1] cd_cubesize = np.zeros((3),dtype=IDTYPE) + np.array(cubesize,dtype=IDTYPE)
@@ -1147,14 +551,11 @@ cpdef get_noise_spectrum_faster(np.ndarray[RDTYPE_t,ndim=3] source,
     cdef np.ndarray[IDTYPE_t,ndim=1] cd_subsamp  = np.zeros((3),dtype=IDTYPE) + np.array(subsamp, dtype=IDTYPE)
        
     if( np.any( cd_cubesize % cd_cubediv != 0 ) ):
-        raise ValueError('get_noise_spectrum_faster: cubesize and subsamp must be compatible.')
+        raise ValueError('get_noise_spectrum: cubesize and subsamp must be compatible.')
 
     if( np.any( (cd_cubediv != 3) * (cd_cubediv != 6) ) ):
-        raise ValueError(f"get_noise_spectrum_faster: only cubedivs of 3 and 6 are supported. ({cd_cubediv})")
-        
-    if( np.any( cd_cubesize % cd_subsamp != 0 ) ):
-        raise ValueError('get_noise_spectrum_faster: subsamp must evenly divide cubesize.')
-        
+        raise ValueError(f"get_noise_spectrum: only cubedivs of 3 and 6 are supported. ({cd_cubediv})")
+             
     # Pull cube size out into individual ints for later use    
     cdef int cd_cube_zsize = cd_cubesize[0]
     cdef int cd_cube_ysize = cd_cubesize[1]
@@ -1168,7 +569,7 @@ cpdef get_noise_spectrum_faster(np.ndarray[RDTYPE_t,ndim=3] source,
     # Define a windowing function array
     cdef np.ndarray[RDTYPE_t,ndim=3] cd_hann = hann_window(cd_cubesize)
     
-    # Define windows to hold the cubie before and after.
+    # Define windows to hold the cubie before and after
     # the cubie gets pre-allocated.  The mcubie is calculated on the fly 
     # by np.abs.
     cdef np.ndarray[RDTYPE_t,ndim=3] cubie  = np.empty(cd_cubesize,dtype=RDTYPE)
@@ -1189,12 +590,12 @@ cpdef get_noise_spectrum_faster(np.ndarray[RDTYPE_t,ndim=3] source,
 
     # Define spectral arrays to hold the ensemble.  Allocate only those that
     # are needed.  Three types of arrays, so three variables.
-    cdef np.ndarray[RDTYPE_t,ndim=4] dark_spectra
+    cdef np.ndarray[RDTYPE_t,ndim=4] const_spectra
     cdef np.ndarray[RDTYPE_t,ndim=4] shot_spectra
     cdef np.ndarray[RDTYPE_t,ndim=4] mult_spectra
 
     if( imodel == 1 or imodel==3):
-        dark_spectra = np.empty( ( cd_cube_zsize, cd_cube_ysize, cd_cube_xsize, n_spectra ) )
+        const_spectra = np.empty( ( cd_cube_zsize, cd_cube_ysize, cd_cube_xsize, n_spectra ) )
     if( imodel == 2 or imodel==3):
         shot_spectra = np.empty( ( cd_cube_zsize, cd_cube_ysize, cd_cube_xsize, n_spectra ) )
     if( imodel == 4):
@@ -1205,7 +606,6 @@ cpdef get_noise_spectrum_faster(np.ndarray[RDTYPE_t,ndim=3] source,
     cdef int cdex = 0
     cdef float acc
     
-    print(f"Accumulating {n_spectra} spectra...")
     # Main accumulation loop
     # Outer 3: across cubies
     for icz in range(0, source_zstop, source_zstride):
@@ -1222,16 +622,23 @@ cpdef get_noise_spectrum_faster(np.ndarray[RDTYPE_t,ndim=3] source,
                             cubie[iz,iy,ix] = cd_hann[iz,iy,ix] * source[ icz+iz, icy+iy, icx+ix]
 
                 # Now Fourier transform.  Replace this with an FFTW call one day.
+                # Might be slower because of the Python call to FFT; is deinitely 
+                # slower because it constructs a new numpy array in np.abs (not
+                # to mention the unnecessary square roots in np.abs -- abs^2 would
+                # be sufficient)
                 mcubie = np.abs(np.fft.fftn( cubie ))
 
-                # Accumulate spectra as needed
+                # Accumulate spectra as needed. Hopefully the branches (A) go at
+                # C speed and (B) benefit from brach prediction.  
+                # It would be better to bring them outside the outer-3
+                # loops, but not as much better as using FFTW instead of np.fft.
                 
                 # Dark spectrum for constant or hybrid model
                 if( imodel==1 or imodel==3 ):
                     for iz in range(0,cd_cube_zsize):
                         for iy in range(0,cd_cube_ysize):
                             for ix in range(0,cd_cube_xsize):
-                                dark_spectra[iz,iy,ix,cdex] = mcubie[iz,iy,ix]
+                                const_spectra[iz,iy,ix,cdex] = mcubie[iz,iy,ix]
                                 
                 # Shot spectrum for shot or hybrid model
                 if( imodel==2 or imodel==3):
@@ -1241,10 +648,12 @@ cpdef get_noise_spectrum_faster(np.ndarray[RDTYPE_t,ndim=3] source,
                         for iy in range(0,cd_cube_ysize):
                             for ix in range(0,cd_cube_xsize):
                                 acc += sqrt(cubie[iz,iy,ix])
+                    if(acc==0):
+                        acc=1
                     for iz in range(0,cd_cube_zsize):
                         for iy in range(0,cd_cube_ysize):
                             for ix in range(0,cd_cube_xsize):
-                                shot_spectra[iz,iy,ix,cdex] = mcubie[iz,iy,ix]/acc
+                                shot_spectra[iz,iy,ix,cdex] = mcubie[iz,iy,ix] / acc
                                 
                 # Proportional spectrum for mult model
                 if( imodel==4):
@@ -1254,6 +663,8 @@ cpdef get_noise_spectrum_faster(np.ndarray[RDTYPE_t,ndim=3] source,
                         for iy in range(0,cd_cube_ysize):
                             for ix in range(0,cd_cube_xsize):
                                 acc += cubie[iz,iy,ix]
+                    if(acc==0):
+                        acc=1
                     for iz in range(0,cd_cube_zsize):
                         for iy in range(0,cd_cube_ysize):
                             for ix in range(0,cd_cube_xsize):
@@ -1262,44 +673,59 @@ cpdef get_noise_spectrum_faster(np.ndarray[RDTYPE_t,ndim=3] source,
                 # Move to the next spectrum
                 cdex+=1
                 
-    print(f"cdex={cdex}; n_spectra={n_spectra}")
-    print(f"Sorting...")
-                
     # Now we've accumulated a collection of spectra.  
     # Define the output dictionary (we're out of the hotspot) and then
     # do the sorting in numpy.
     
     out = {'model':model}
     
+    assert(cdex==n_spectra)
+    
     if( imodel==1 or imodel==3):
-        dark_spectra.sort(axis=-1)
+        const_spectra.sort(axis=-1)
         if(imodel==1):
-            dex = int( pct / 100 * cdex )
+            dex = int( (pct / 100.0) * cdex )
         else:
-            dex = int( dkpct / 100 * cdex )
-        out['const_spectrum'] = dark_spectra[:,:,:,dex]+0
+            dex = int( (dkpct / 100.0) * cdex )
+        # Make sure we always keep the 0 and 1 components  
+        for iz in (-1,0,1):
+            for iy in (-1,0,1):
+                for ix in (-1,0,1):
+                    const_spectra[iz,iy,ix,dex] = 0                    
+        out['const_spectrum'] = const_spectra[:,:,:,dex]+0
+           
         
     if( imodel==2 or imodel==3):
         shot_spectra.sort(axis=-1)
         dex = int( pct/100 * cdex )
+        
+        # Make sure we always keep the 0 and 1 components 
+        for iz in (-1,0,1):
+            for iy in (-1,0,1):
+                for ix in (-1,0,1):
+                    shot_spectra[iz,iy,ix,dex] = 0
         out['shot_spectrum'] = shot_spectra[:,:,:,dex]+0
+             
     
     if( imodel==4):
         mult_spectra.sort(axis=-1)
         dex = int( pct/100 * cdex )
+        # Make sure we always keep the 0 and 1 components 
+        for iz in (-1,0,1):
+            for iy in (-1,0,1):
+                for ix in (-1,0,1):
+                    mult_spectra[iz,iy,ix,dex] = 0
         out['mult_spectrum'] = mult_spectra[:,:,:,dex]+0
-        
-    print("get_noise_spectrum_faster: done.")
-    
+            
     return out
 
 
-cpdef noise_gate_batch_faster(
+cpdef noise_gate_batch(
         np.ndarray[RDTYPE_t,ndim=3] source,
-        float pct=50,
+        float pct=30,
         float dkpct=5,
-        float factor=1.8,
-        float dkfactor=1.8,
+        float factor=1.5,
+        float dkfactor=1.5,
         str method='gate',
         str model='hybrid',
         cubesize=18,
@@ -1309,7 +735,7 @@ cpdef noise_gate_batch_faster(
         spectrum=None,
         ):
     '''
-    noise_gate_batch_faster - carry out noise gatng on an image sequence contained
+    noise_gate_batch - carry out noise gatng on an image sequence contained
     in a 3D numpy array.  Returns the modified array.
     
     The noise gating follows the analysis in the DeForest 2017 paper.
@@ -1317,19 +743,12 @@ cpdef noise_gate_batch_faster(
     This version tries to lean in to the Cython approach and eschews 
     cubification completely.
     
-    the data are cubified nto neighborhoods and subjected to Hann windowing,
-    then (if necessary) sent to the noise spectrum estimator 
-    (get_noise_spectrum).  Then the cubified data are compared to the noise 
-    spectrum and filtered with a locally constructed adaptive filter that keeps 
-    the significant terms in the local neighborhood Fourier transform around 
-    each point.  Finally the cubies are reassembled to match the original data.
-    
     Specific algorithmic adjustments are described in the parameters section 
     below
     
-    The cubification strategy uses the identity that 
+    The neighborhood processing strategy uses the identity that 
         sum(x=0,2π/3,4π/3) sin^4 (x + z) = 1.125
-    to merge apodization and recombination.  The neighborhoods are subsampled by
+    to merge apodization and recombination.  Neighborhoods are subsampled by
     a factor of 3, and offset-summed to reconstitute the original data.  this
     means that a margin near each boundary of the data set remains apodized.
     The sin^4 comes from *double* apodization: each cube is apodized with a
@@ -1450,12 +869,13 @@ cpdef noise_gate_batch_faster(
     else:
         raise ValueError("noise_gate_batch: Mode must be constant, hybrid, shot, or multiplicative")
         
-          
+    # Converting model to a cdeffed "imethod" lets us use integer comparisons later
     cdef int imethod
     if(method[0]=='g'):
         imethod = 1
     elif(method[0]=='w'):
         imethod = 2
+        raise ValueError("noise_gate_batch: wiener filter not implemented (yet)")
     else: 
         raise ValueError("noise_gate_batch: method must be gate or wiener")
   
@@ -1465,23 +885,12 @@ cpdef noise_gate_batch_faster(
     cdef np.ndarray[IDTYPE_t,ndim=1] cd_cubediv  = np.zeros((3),dtype=IDTYPE) + np.array(cubediv, dtype=IDTYPE)
     cdef np.ndarray[IDTYPE_t,ndim=1] cd_subsamp  = np.zeros((3),dtype=IDTYPE) + np.array(subsamp, dtype=IDTYPE)
        
-    if( np.any( cd_cubesize % cd_cubediv != 0 ) ):
-        raise ValueError('get_noise_spectrum_faster: cubesize and subsamp must be compatible.')
-
-    if( np.any( (cd_cubediv != 3) * (cd_cubediv != 6) ) ):
-        raise ValueError(f"get_noise_spectrum_faster: only cubedivs of 3 and 6 are supported. ({cd_cubediv})")
-        
-    if( np.any( cd_cubesize % cd_subsamp != 0 ) ):
-        raise ValueError('get_noise_spectrum_faster: subsamp must evenly divide cubesize.')
-        
-    # Pull cube size out into individual ints for later use    
-    cdef int cd_cube_zsize = cd_cubesize[0]
-    cdef int cd_cube_ysize = cd_cubesize[1]
-    cdef int cd_cube_xsize = cd_cubesize[2]
- 
     
+    if( np.any( cd_cubesize % cd_cubediv != 0 ) ):
+        raise ValueError('noise_gate_batch: cubesize and subsamp must be compatible.')
+
     if( spectrum is None):
-       spectrum = get_noise_spectrum_faster(source, 
+       spectrum = get_noise_spectrum(source, 
                                             pct=pct,
                                             dkpct=dkpct,
                                             model=model,
@@ -1490,3 +899,140 @@ cpdef noise_gate_batch_faster(
                                             subsamp=subsamp
                                             )
        
+    # Pull cube size out into individual ints for later use    
+    cdef int cd_cube_zsize = cd_cubesize[0]
+    cdef int cd_cube_ysize = cd_cubesize[1]
+    cdef int cd_cube_xsize = cd_cubesize[2]
+    
+    # cdef loop ends
+    cdef int source_zstop = source.shape[0] - cd_cube_zsize
+    cdef int source_ystop = source.shape[1] - cd_cube_ysize
+    cdef int source_xstop = source.shape[2] - cd_cube_xsize
+    
+    # Define strides through the source array for each cube.  This is how 
+    # far we step for each cubie.
+    cdef int source_zstride = cd_cube_zsize / cd_cubediv[0]
+    cdef int source_ystride = cd_cube_ysize / cd_cubediv[1]
+    cdef int source_xstride = cd_cube_xsize / cd_cubediv[2]
+
+    # Grab a Hann window function (sin**2)
+    cdef np.ndarray[RDTYPE_t,ndim=3] cd_hann = hann_window(cd_cubesize)
+    cdef np.ndarray[RDTYPE_t,ndim=3] cd_hann2
+    
+    # Set the Hann scaling function (trig on sin**4 sums)
+    cdef float hannscale = 1
+    cdef int i
+    for i in range(3):
+        if(cd_cubediv[i] == 3):
+            hannscale *= 8.0/9.0
+        elif(cd_cubediv[i] == 6):
+            hannscale *= 4.0/9.0
+        else:
+            raise ValueError(f"noise_gate_batch: only cubedivs of 3 and 6 are supported. ({cd_cubediv})")
+    cd_hann2 = cd_hann * hannscale
+    
+    # Allocate the output array.  Has to be set to zero since we accumulate on the fly
+    cdef np.ndarray[RDTYPE_t,ndim=3] dest = np.zeros([source.shape[0],source.shape[1],source.shape[2]])
+    
+    # Allocate the "holding tank" and the Fourier transform for each cubie
+    cdef np.ndarray[RDTYPE_t,ndim=3] cubie = np.empty(cd_cubesize,dtype=RDTYPE)
+    cdef np.ndarray[CDTYPE_t,ndim=3] fcubie
+    cdef np.ndarray[RDTYPE_t,ndim=3] mcubie 
+    
+ 
+    # Extract the spectra we need
+    cdef np.ndarray[RDTYPE_t,ndim=3] const_spectrum
+    cdef np.ndarray[RDTYPE_t,ndim=3] var_spectrum
+    
+    if(imodel==2 or imodel==3):
+        shot_spectrum = spectrum['shot_spectrum'] * factor
+    if(imodel==4):
+        mult_spectrum = spectrum['mult_spectrum'] * factor
+        
+    # Define some loop variables.
+    cdef int ix, iy, iz, icx, icy, icz
+    cdef float acc
+    
+    # Figure relevant spectrum reference
+    if(imodel==1):
+        const_spectrum = spectrum['const_spectrum'] * factor
+    elif(imodel==2):
+        var_spectrum = spectrum['shot_spectrum'] * factor
+    elif(imodel==3):
+        const_spectrum = spectrum['const_spectrum'] * dkfactor
+        var_spectrum = spectrum['shot_spectrum'] * factor
+    elif(imodel==4):
+        var_spectrum = spectrum['mult_spectrum'] * factor
+    
+    
+    for icz in range(0, source_zstop, source_zstride):
+        for icy in range(0, source_ystop, source_ystride):
+            for icx in range(0, source_xstop, source_xstride):
+                    
+                # Copy the current cubie into the holding tank
+                for iz in range(0,cd_cube_zsize):
+                    for iy in range(0, cd_cube_ysize):
+                        for ix in range(0, cd_cube_xsize):
+                            cubie[iz, iy, ix] = cd_hann[iz, iy, ix] * source[ icz+iz, icy+iy, icx+ix]
+                
+                # Fourier transform
+                fcubie = np.fft.fftn( cubie )
+                mcubie = np.abs(fcubie)
+                
+                # Accumulate a local scaling factor if necessary
+                if( imodel ==2 or imodel==3 ):
+                    # Shot noise needs the sum-of-sqrts
+                    acc = 0
+                    for iz in range(0,cd_cube_zsize):
+                        for iy in range(0,cd_cube_ysize):
+                            for ix in range(0,cd_cube_xsize):
+                                acc += sqrt(cubie[iz,iy,ix])
+                elif( imodel==4 ):
+                    # Multiplicative noise needs the sum
+                    acc = 0
+                    for iz in range(0,cd_cube_zsize):
+                        for iy in range(0,cd_cube_ysize):
+                            for ix in range(0,cd_cube_xsize):
+                                acc += cubie[iz,iy,ix]
+
+                # Do the actual filtering: constant spectrum, variable spectrum, or hybrid
+                if( imodel==1):
+                    for iz in range(0,cd_cube_zsize):
+                        for iy in range(0,cd_cube_ysize):
+                            for ix in range(0,cd_cube_xsize):
+                                if(mcubie[iz,iy,ix] < const_spectrum[iz,iy,ix]):
+                                    fcubie[iz,iy,ix]=0
+                elif( imodel==2 or imodel==4):
+                    for iz in range(0,cd_cube_zsize):
+                        for iy in range(0,cd_cube_ysize):
+                            for ix in range(0,cd_cube_xsize):
+                                if(mcubie[iz,iy,ix] < var_spectrum[iz,iy,ix] * acc):
+                                    fcubie[iz,iy,ix]=0
+                elif( imodel==3):
+                    for iz in range(0,cd_cube_zsize):
+                        for iy in range(0,cd_cube_ysize):
+                            for ix in range(0,cd_cube_xsize):
+                                if(mcubie[iz,iy,ix] < var_spectrum[iz,iy,ix] * acc or
+                                   mcubie[iz,iy,ix] < const_spectrum[iz,iy,ix]):
+                                    fcubie[iz,iy,ix]=0
+
+                # Inverse Fourier transform the cubie and accumulate it into the destination
+                mcubie = np.real(np.fft.ifftn(fcubie))
+                for iz in range(0,cd_cube_zsize):
+                    for iy in range(0,cd_cube_ysize):
+                        for ix in range(0,cd_cube_xsize):
+                            dest[ icz+iz, icy+iy, icx+ix] += mcubie[iz, iy, ix] * cd_hann2[iz, iy, ix]
+                           
+    return dest
+
+                        
+
+                    
+                                
+                
+                
+                
+                
+    
+
+ 
