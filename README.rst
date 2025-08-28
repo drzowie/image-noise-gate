@@ -41,6 +41,7 @@ functions around noise_gate_batch.
 
 Batch processing
 ----------------
+You can import `noise_gate_batch` with `from noisegate import noise_gate_batch` and run it:
 
 `noise_gate_batch(data_cube, cubesize=12, model='hybrid', factor=2.0)`
 
