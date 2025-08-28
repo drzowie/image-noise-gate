@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools", "cython", "numpy"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "noisegate"
+version = "0.0.2"
+dependencies = [
+    'pytest',     # testing
+    'numpy',      # basic numerics
+    'cython',     # static compilation and C objects
+]
+authors = [
+    {name = "Craig DeForest", email = "craig.deforest@swri.org"},
+]
+readme = "README.rst"

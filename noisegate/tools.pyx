@@ -577,9 +577,9 @@ cpdef get_noise_spectrum(np.ndarray[RDTYPE_t,ndim=3] source,
   
     # Define strides through the source array for each cube.  This is how 
     # far we step for each comparison spectrum.
-    cdef int source_zstride = cd_cube_zsize * cd_subsamp[0] / cd_cubediv[0]
-    cdef int source_ystride = cd_cube_ysize * cd_subsamp[1] / cd_cubediv[1]
-    cdef int source_xstride = cd_cube_xsize * cd_subsamp[2] / cd_cubediv[2]
+    cdef int source_zstride = cd_cube_zsize * cd_subsamp[0] // cd_cubediv[0]
+    cdef int source_ystride = cd_cube_ysize * cd_subsamp[1] // cd_cubediv[1]
+    cdef int source_xstride = cd_cube_xsize * cd_subsamp[2] // cd_cubediv[2]
     
     # Calculate how many spectra we are examining
     cdef int n_spectra = (
@@ -911,9 +911,9 @@ cpdef noise_gate_batch(
     
     # Define strides through the source array for each cube.  This is how 
     # far we step for each cubie.
-    cdef int source_zstride = cd_cube_zsize / cd_cubediv[0]
-    cdef int source_ystride = cd_cube_ysize / cd_cubediv[1]
-    cdef int source_xstride = cd_cube_xsize / cd_cubediv[2]
+    cdef int source_zstride = cd_cube_zsize // cd_cubediv[0]
+    cdef int source_ystride = cd_cube_ysize // cd_cubediv[1]
+    cdef int source_xstride = cd_cube_xsize // cd_cubediv[2]
 
     # Grab a Hann window function (sin**2)
     cdef np.ndarray[RDTYPE_t,ndim=3] cd_hann = hann_window(cd_cubesize)

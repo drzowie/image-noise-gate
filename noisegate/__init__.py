@@ -1,6 +1,1 @@
-# -*- coding: utf-8 -*-
-
-# Load the main modules
-
-# Primary tools  
-from .tools import *
+from noisegate.tools import noise_gate_batch

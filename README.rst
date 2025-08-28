@@ -30,6 +30,9 @@ swath 8 pixels wide is invalidated at each border of the data set.
 Typical usage
 =============
 
+Install the package by cloning from GitHub and running `pip install .`
+in the cloned directory. This will install in your local environment.
+
 The basic operation is to noise-gate a batch of images that can all fit in
 RAM.  That operation is implemented with noise_gate_batch().  Large-batch 
 and stream processing are also possible and are implemented with wrapper 
@@ -39,7 +42,7 @@ functions around noise_gate_batch.
 Batch processing
 ----------------
 
-noise_gate_batch(data_cube, cubesize=12, model='hybrid', factor=2.0)
+`noise_gate_batch(data_cube, cubesize=12, model='hybrid', factor=2.0)`
 
 
 Large-batch processing
